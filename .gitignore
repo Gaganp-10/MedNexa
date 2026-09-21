@@ -1,14 +1,28 @@
-﻿venv/
+# Python
+venv/
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+
+# Database
 db.sqlite3
 *.sqlite3
+
+# Media uploads (contains PHI wound images)
 media/
+
+# Static files (collected)
 staticfiles/
+
+# Environment / secrets
 .env
 *.pem
+
+# IDE
 .vscode/
 .idea/
+
+# OS
 .DS_Store
 Thumbs.db

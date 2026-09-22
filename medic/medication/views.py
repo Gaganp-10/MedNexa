@@ -1,18 +1,27 @@
+import datetime
 from django.http import Http404
+from django.utils import timezone
 from rest_framework import generics, serializers, status
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 
 from accounts.permissions import IsDoctor, IsPatient
 from accounts.access import get_accessible_patient
-from .models import Medication
-from .serializers import MedicationSerializer, MedicationStatusUpdateSerializer
+from .models import Medication, MedicationDose
+from .serializers import (
+    MedicationSerializer,
+    MedicationStatusUpdateSerializer,
+    MedicationDoseSerializer,
+)
+from .services import generate_upcoming_doses, calculate_patient_adherence
 
 
 class CreateMedicationView(generics.CreateAPIView):
     """
     Allows a doctor to prescribe medication for their assigned patients.
     Validates assignment using get_accessible_patient.
+    Immediately generates upcoming doses for the newly prescribed medication.
     """
     permission_classes = [IsAuthenticated, IsDoctor]
     serializer_class = MedicationSerializer
@@ -28,7 +37,10 @@ class CreateMedicationView(generics.CreateAPIView):
         if not self.request.user.is_superuser and patient_profile.doctor_id != self.request.user.id:
             raise Http404("Patient not found or not assigned to you.")
 
-        serializer.save(patient=patient_profile)
+        medication = serializer.save(patient=patient_profile)
+
+        # Generate upcoming doses immediately
+        generate_upcoming_doses(medication, days=7)
 
 
 class MedicationListView(generics.ListAPIView):
@@ -48,8 +60,8 @@ class MedicationListView(generics.ListAPIView):
 
 class MedicationStatusUpdateView(generics.UpdateAPIView):
     """
-    Allows a patient to update the taken_status of their own prescribed medication.
-    Only the taken_status field is writable.
+    Legacy endpoint for patient updating taken_status of their own prescribed medication.
+    Synchronizes the active dose for today to 'taken'.
     """
     permission_classes = [IsAuthenticated, IsPatient]
     serializer_class = MedicationStatusUpdateSerializer
@@ -73,4 +85,138 @@ class MedicationStatusUpdateView(generics.UpdateAPIView):
         serializer = self.get_serializer(medication, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+
+        # Synchronize today's dose if marking as taken
+        if serializer.validated_data.get("taken_status"):
+            today = timezone.localdate()
+            today_dose = MedicationDose.objects.filter(
+                medication=medication,
+                scheduled_for__date=today
+            ).first()
+
+            if not today_dose:
+                # If no dose exists for today yet, generate it
+                doses = generate_upcoming_doses(medication, days=1, start_date=today)
+                today_dose = doses[0] if doses else None
+
+            if today_dose and today_dose.status != "taken":
+                today_dose.status = "taken"
+                today_dose.taken_at = timezone.now()
+                today_dose.save(update_fields=["status", "taken_at"])
+
         return Response(MedicationSerializer(medication).data)
+
+
+class PatientTodayDosesView(APIView):
+    """
+    Returns all medication doses scheduled for today for the authenticated patient.
+    Derives patient identity strictly from request.user.
+    """
+    permission_classes = [IsAuthenticated, IsPatient]
+
+    def get(self, request):
+        patient_profile = getattr(request.user, "patientprofile", None)
+        if not patient_profile:
+            return Response([], status=status.HTTP_200_OK)
+
+        today = timezone.localdate()
+        doses = MedicationDose.objects.filter(
+            medication__patient=patient_profile,
+            scheduled_for__date=today
+        ).select_related("medication").order_by("scheduled_for")
+
+        serializer = MedicationDoseSerializer(doses, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class PatientUpcomingDosesView(APIView):
+    """
+    Returns upcoming scheduled doses for the authenticated patient.
+    Derives patient identity strictly from request.user (never from query or body).
+    """
+    permission_classes = [IsAuthenticated, IsPatient]
+
+    def get(self, request):
+        patient_profile = getattr(request.user, "patientprofile", None)
+        if not patient_profile:
+            return Response([], status=status.HTTP_200_OK)
+
+        try:
+            days = int(request.query_params.get("days", 7))
+        except (ValueError, TypeError):
+            days = 7
+
+        now = timezone.now()
+        end_time = now + datetime.timedelta(days=days)
+
+        doses = MedicationDose.objects.filter(
+            medication__patient=patient_profile,
+            scheduled_for__gte=now,
+            scheduled_for__lte=end_time
+        ).select_related("medication").order_by("scheduled_for")
+
+        serializer = MedicationDoseSerializer(doses, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class TakeDoseView(APIView):
+    """
+    Marks a scheduled dose as taken.
+    Restricted to patients only (doctors receive 403; unauthorized patients receive 404).
+    Derives patient identity strictly from request.user.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, dose_id):
+        if request.user.role != "patient":
+            return Response(
+                {"detail": "Doctors prescribe medications; only patients record taking doses."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        patient_profile = getattr(request.user, "patientprofile", None)
+        if not patient_profile:
+            raise Http404("Dose not found.")
+
+        try:
+            dose = MedicationDose.objects.select_related("medication__patient").get(pk=dose_id)
+        except MedicationDose.DoesNotExist:
+            raise Http404("Dose not found.")
+
+        # Ensure calling patient owns this dose's patient profile
+        if dose.medication.patient_id != patient_profile.id:
+            raise Http404("Dose not found.")
+
+        dose.status = "taken"
+        if not dose.taken_at:
+            dose.taken_at = timezone.now()
+        dose.save(update_fields=["status", "taken_at"])
+
+        # Also update parent legacy field
+        dose.medication.taken_status = True
+        dose.medication.save(update_fields=["taken_status"])
+
+        return Response(MedicationDoseSerializer(dose).data, status=status.HTTP_200_OK)
+
+
+class PatientMedicationAdherenceView(APIView):
+    """
+    Detailed medication adherence summary for a specific patient.
+    Accessible to the patient themselves, their assigned doctor, or superusers.
+    Uses central get_accessible_patient helper.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, patient_id):
+        patient_profile = get_accessible_patient(request.user, patient_id)
+
+        try:
+            days = int(request.query_params.get("days", 7))
+        except (ValueError, TypeError):
+            days = 7
+
+        adherence = calculate_patient_adherence(patient_profile, window_days=days)
+        return Response({
+            "patient_id": patient_profile.id,
+            **adherence
+        }, status=status.HTTP_200_OK)

@@ -118,21 +118,28 @@ class Command(BaseCommand):
         )
 
         # 3. Medications
-        Medication.objects.update_or_create(
+        from medication.services import generate_upcoming_doses
+
+        m1, _ = Medication.objects.update_or_create(
             patient=p1_profile,
             medicine_name="Amoxicillin",
             defaults={"dosage": "500mg", "time": datetime.time(8, 0), "taken_status": True}
         )
-        Medication.objects.update_or_create(
+        generate_upcoming_doses(m1, days=7)
+
+        m2, _ = Medication.objects.update_or_create(
             patient=p1_profile,
             medicine_name="Paracetamol",
             defaults={"dosage": "1000mg", "time": datetime.time(14, 0), "taken_status": False}
         )
-        Medication.objects.update_or_create(
+        generate_upcoming_doses(m2, days=7)
+
+        m3, _ = Medication.objects.update_or_create(
             patient=p2_profile,
             medicine_name="Ibuprofen",
             defaults={"dosage": "400mg", "time": datetime.time(9, 0), "taken_status": True}
         )
+        generate_upcoming_doses(m3, days=7)
 
         # 4. Sample Health Logs for Patient Alice
         if not DailyHealthLog.objects.filter(patient=p1_profile).exists():

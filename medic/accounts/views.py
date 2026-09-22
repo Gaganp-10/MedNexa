@@ -1,3 +1,5 @@
+import datetime
+from django.utils import timezone
 from django.http import Http404
 from rest_framework import generics
 from rest_framework.response import Response
@@ -42,11 +44,13 @@ class DoctorOverviewView(APIView):
         patients = (
             PatientProfile.objects.filter(doctor=doctor)
             .select_related("user")
-            .prefetch_related("health_logs", "wound_images", "alerts", "medications")
+            .prefetch_related("health_logs", "wound_images", "alerts", "medications__doses")
             .order_by("id")
         )
 
         patient_summaries = []
+        now = timezone.now()
+        window_start = now - datetime.timedelta(days=7)
 
         for p in patients:
             # Prefetched querysets
@@ -63,10 +67,14 @@ class DoctorOverviewView(APIView):
             risk_indicator = predict_patient_risk(latest_log, wound_res)
             latest_recovery_score = latest_log.recovery_score if latest_log else 100
 
-            # Medication adherence
-            total_meds = len(meds)
-            taken_meds = sum(1 for m in meds if m.taken_status)
-            adherence_pct = round((taken_meds / total_meds * 100), 1) if total_meds > 0 else 100.0
+            # Medication adherence computed from MedicationDose
+            all_doses = [d for m in meds for d in m.doses.all()]
+            due_doses = [d for d in all_doses if d.scheduled_for >= window_start and d.scheduled_for <= now]
+
+            total_due = len(due_doses)
+            taken_doses = sum(1 for d in due_doses if d.status == "taken")
+            missed_doses = sum(1 for d in due_doses if d.status == "missed")
+            adherence_pct = round((taken_doses / total_due * 100), 1) if total_due > 0 else 100.0
 
             log_summary = None
             if latest_log:
@@ -101,8 +109,11 @@ class DoctorOverviewView(APIView):
                 "latest_health_log": log_summary,
                 "latest_wound_upload": wound_summary,
                 "medication_adherence": {
-                    "total_prescribed": total_meds,
-                    "doses_recorded_taken": taken_meds,
+                    "total_prescribed": len(meds),
+                    "total_scheduled_due": total_due,
+                    "doses_taken": taken_doses,
+                    "doses_missed": missed_doses,
+                    "doses_recorded_taken": taken_doses,
                     "adherence_percentage": adherence_pct,
                 },
             })

@@ -130,3 +130,64 @@ class AccountsSecurityAndAccessTests(TestCase):
 
         res_patients = self.client.get("/api/doctor/patients/")
         self.assertEqual(res_patients.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_auth_me_for_doctor(self):
+        """GET /api/auth/me/ returns doctor identity and doctor_profile_id."""
+        doc_profile = DoctorProfile.objects.create(user=self.doc1, specialization="Surgeon")
+        self.client.force_authenticate(user=self.doc1)
+
+        res = self.client.get("/api/auth/me/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["id"], self.doc1.id)
+        self.assertEqual(res.data["username"], self.doc1.username)
+        self.assertEqual(res.data["role"], "doctor")
+        self.assertEqual(res.data["doctor_profile_id"], doc_profile.id)
+
+    def test_auth_me_for_patient_with_assigned_doctor(self):
+        """GET /api/auth/me/ returns patient profile and assigned doctor details."""
+        self.client.force_authenticate(user=self.patient1_user)
+
+        res = self.client.get("/api/auth/me/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["id"], self.patient1_user.id)
+        self.assertEqual(res.data["username"], self.patient1_user.username)
+        self.assertEqual(res.data["role"], "patient")
+        self.assertEqual(res.data["patient_profile_id"], self.patient1_profile.id)
+        self.assertEqual(res.data["assigned_doctor"]["id"], self.doc1.id)
+        self.assertEqual(res.data["assigned_doctor"]["name"], self.doc1.get_full_name() or self.doc1.username)
+
+    def test_auth_me_for_patient_without_assigned_doctor(self):
+        """GET /api/auth/me/ handles patients without assigned doctor gracefully."""
+        p_unassigned = User.objects.create_user(username="p_no_doc", password="password123", role="patient")
+        p_profile = PatientProfile.objects.create(
+            user=p_unassigned, surgery_type="Test", surgery_date=datetime.date(2026, 1, 1), doctor=None
+        )
+        self.client.force_authenticate(user=p_unassigned)
+
+        res = self.client.get("/api/auth/me/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["patient_profile_id"], p_profile.id)
+        self.assertIsNone(res.data["assigned_doctor"])
+
+    def test_patient_profile_me_endpoint(self):
+        """GET /api/patient/profile/ returns patient profile for patient and 403 for doctor."""
+        self.client.force_authenticate(user=self.patient1_user)
+        res_patient = self.client.get("/api/patient/profile/")
+        self.assertEqual(res_patient.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_patient.data["patient_profile_id"], self.patient1_profile.id)
+
+        self.client.force_authenticate(user=self.doc1)
+        res_doc = self.client.get("/api/patient/profile/")
+        self.assertEqual(res_doc.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_seed_demo_refuses_when_debug_false(self):
+        """seed_demo must refuse to execute when DEBUG is False."""
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+        from django.test import override_settings
+
+        with override_settings(DEBUG=False):
+            with self.assertRaises(CommandError) as cm:
+                call_command("seed_demo")
+            self.assertIn("DEBUG is True", str(cm.exception))
+

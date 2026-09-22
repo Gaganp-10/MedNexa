@@ -1,5 +1,6 @@
 import datetime
-from django.core.management.base import BaseCommand
+from django.conf import settings
+from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 from accounts.models import User, DoctorProfile, PatientProfile
 from monitoring.models import DailyHealthLog
@@ -12,6 +13,9 @@ class Command(BaseCommand):
     help = "Seeds demo doctors, assigned patients, health logs, and medications (dev only)."
 
     def handle(self, *args, **options):
+        if not settings.DEBUG:
+            raise CommandError("seed_demo can only be run when DEBUG is True.")
+
         self.stdout.write(self.style.NOTICE("Seeding MEDIC demo dataset..."))
 
         # 1. Doctors

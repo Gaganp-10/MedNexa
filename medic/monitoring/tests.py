@@ -190,3 +190,40 @@ class MonitoringSecurityAndValidationTests(TestCase):
         res_risk = self.client.get(f"/api/patient/{self.p1_profile.id}/risk/")
         self.assertEqual(res_risk.status_code, status.HTTP_200_OK)
         self.assertIn("Insufficient data", res_risk.data["risk_prediction"])
+
+    def _create_sample_webp_file(self, filename="wound.webp", size=(50, 50)):
+        img = PILImage.new("RGB", size, color="blue")
+        buf = io.BytesIO()
+        img.save(buf, format="WEBP")
+        buf.seek(0)
+        return SimpleUploadedFile(filename, buf.read(), content_type="image/webp")
+
+    def test_wound_image_file_stream_security_headers(self):
+        """Wound image streaming response includes Cache-Control and X-Content-Type-Options."""
+        img_file = self._create_sample_image_file()
+        wound = WoundImage.objects.create(patient=self.p1_profile, image=img_file)
+        stream_url = f"/api/wound/images/{wound.id}/file/"
+
+        self.client.force_authenticate(user=self.p1_user)
+        response = self.client.get(stream_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.headers.get("Cache-Control"), "private, no-store")
+        self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
+
+    def test_wound_upload_valid_webp_accepted(self):
+        """Wound image upload accepts valid WebP images."""
+        self.client.force_authenticate(user=self.p1_user)
+        webp_file = self._create_sample_webp_file()
+
+        response = self.client.post("/api/wound/upload/", {"image": webp_file}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(WoundImage.objects.filter(patient=self.p1_profile).exists())
+
+    def test_wound_upload_spoofed_webp_rejected(self):
+        """Wound image upload rejects invalid/spoofed WebP files."""
+        self.client.force_authenticate(user=self.p1_user)
+        fake_file = SimpleUploadedFile("fake.webp", b"NOT_A_WEBP_IMAGE_CONTENT", content_type="image/webp")
+
+        response = self.client.post("/api/wound/upload/", {"image": fake_file}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+

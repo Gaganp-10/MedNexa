@@ -7,21 +7,50 @@ NOT diagnostic findings. They are threshold-based indicators designed to prompt
 clinical review by the assigned healthcare team.
 """
 import logging
-from .models import Alert
+from django.db import transaction
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
+from .models import Alert
 
 logger = logging.getLogger(__name__)
+
+
+def dispatch_alert_to_doctor(doctor_id, payload):
+    """
+    Delivers an alert payload strictly to doctor_<doctor_id>_alerts.
+    Safely wraps channel-layer calls in try/except with logging so a delivery
+    failure never causes calling requests to fail.
+    Never logs sensitive health data or credentials.
+    """
+    if not doctor_id:
+        return
+
+    try:
+        channel_layer = get_channel_layer()
+        if channel_layer:
+            async_to_sync(channel_layer.group_send)(
+                f"doctor_{doctor_id}_alerts",
+                {
+                    "type": "send_alert",
+                    **payload
+                }
+            )
+    except Exception as e:
+        logger.error(f"WebSocket delivery failure in alert dispatch: {type(e).__name__}")
 
 
 def analyze_health_log(log):
     """
     Evaluates health log vitals against prototype decision-support thresholds.
-    Creates Alert records and dispatches real-time WebSocket notifications.
+    Creates Alert records and dispatches real-time WebSocket notifications strictly
+    to the patient's assigned doctor's group (doctor_<doctor_id>_alerts).
+
+    Skips cleanly with no error when the patient has no assigned doctor.
+    Broadcast payload contains only: alert id, patient_id, patient display name,
+    severity, message, created_at (no raw vitals).
     
-    NOTE FOR PHASE 5:
-    Currently broadcasts to global group "doctor_alerts".
-    Phase 5 will replace this with targeted dispatch to the patient's assigned doctor (doctor_<id>_alerts).
+    Wrapped in transaction.on_commit so an alert is never broadcast for a database
+    write that gets rolled back.
     """
     alerts_to_create = []
 
@@ -50,31 +79,33 @@ def analyze_health_log(log):
             ("Medication adherence notice: scheduled dose not recorded (prototype indicator)", "low")
         )
 
-    channel_layer = get_channel_layer()
+    patient = log.patient
+    doctor_id = patient.doctor_id
+    patient_display_name = patient.user.get_full_name() or patient.user.username
 
     created_alerts = []
     for message, severity in alerts_to_create:
         alert = Alert.objects.create(
-            patient=log.patient,
+            patient=patient,
             message=message,
             severity=severity
         )
         created_alerts.append(alert)
 
-        # Broadcast via Channel layer if available
-        if channel_layer:
-            try:
-                # Dispatches to "doctor_alerts" group (Phase 5 will isolate this per-doctor)
-                async_to_sync(channel_layer.group_send)(
-                    "doctor_alerts",
-                    {
-                        "type": "send_alert",
-                        "patient_id": log.patient.id,
-                        "message": message,
-                        "severity": severity,
-                    }
-                )
-            except Exception as e:
-                logger.error(f"Failed to dispatch alert over WebSocket: {e}")
+        # Only dispatch if patient has an assigned doctor; skip cleanly otherwise
+        if doctor_id:
+            payload = {
+                "alert_id": alert.id,
+                "id": alert.id,
+                "patient_id": patient.id,
+                "patient_display_name": patient_display_name,
+                "severity": severity,
+                "message": message,
+                "created_at": alert.created_at.isoformat(),
+            }
+            # Wrap broadcast in on_commit to prevent leaks on rollback
+            transaction.on_commit(
+                lambda d_id=doctor_id, p=payload: dispatch_alert_to_doctor(d_id, p)
+            )
 
     return created_alerts

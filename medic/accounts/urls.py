@@ -7,9 +7,13 @@ from .views import (
     PatientAlertsView,
     PatientRecoveryTrendView,
     PatientRiskPredictionView,
+    AuthMeView,
+    PatientProfileMeView,
 )
 
 urlpatterns = [
+    path("auth/me/", AuthMeView.as_view(), name="auth-me"),
+    path("patient/profile/", PatientProfileMeView.as_view(), name="patient-profile-me"),
     path("doctor/overview/", DoctorOverviewView.as_view(), name="doctor-overview"),
     path("doctor/patients/", DoctorPatientsView.as_view(), name="doctor-patients"),
     path("patient/<int:patient_id>/logs/", PatientHealthLogsView.as_view(), name="patient-logs"),

@@ -4,7 +4,7 @@ from rest_framework import serializers
 from .models import DailyHealthLog, WoundImage
 
 MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
-ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 class DailyHealthLogSerializer(serializers.ModelSerializer):
@@ -84,9 +84,9 @@ class WoundImageSerializer(serializers.ModelSerializer):
         try:
             image = PILImage.open(file_obj)
             image.verify()
-            if image.format.upper() not in ["JPEG", "PNG"]:
+            if image.format.upper() not in ["JPEG", "PNG", "WEBP"]:
                 raise serializers.ValidationError(
-                    f"Invalid image format '{image.format}'. Only JPEG and PNG are permitted."
+                    f"Invalid image format '{image.format}'. Only JPEG, PNG, and WebP are permitted."
                 )
             # Reset pointer after verify()
             file_obj.seek(0)

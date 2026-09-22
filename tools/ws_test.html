@@ -1,0 +1,228 @@
+<!-- Symlink-equivalent copy of medic/tools/ws_test.html at repository root level -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MedNexa - WebSocket Live Alert & Notification Tester</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --accent: #38bdf8;
+            --accent-hover: #0284c7;
+            --border: #334155;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --success: #10b981;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        body { background: var(--bg-color); color: var(--text-primary); padding: 2rem; min-height: 100vh; }
+        .container { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 1.5rem; }
+        header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 1rem; }
+        h1 { font-size: 1.5rem; font-weight: 700; color: var(--accent); }
+        .badge { font-size: 0.75rem; padding: 0.25rem 0.6rem; border-radius: 9999px; font-weight: 600; text-transform: uppercase; }
+        .status-disconnected { background: #374151; color: #9ca3af; }
+        .status-connecting { background: #78350f; color: #fde68a; }
+        .status-connected { background: #064e3b; color: #6ee7b7; }
+        .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 0.75rem; padding: 1.25rem; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+        label { display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 0.35rem; }
+        input, select { width: 100%; padding: 0.6rem; background: #0b1120; border: 1px solid var(--border); border-radius: 0.5rem; color: white; font-size: 0.9rem; }
+        input:focus { outline: none; border-color: var(--accent); }
+        .actions { display: flex; gap: 0.75rem; margin-top: 1rem; }
+        button { cursor: pointer; padding: 0.6rem 1.2rem; border-radius: 0.5rem; border: none; font-weight: 600; font-size: 0.9rem; transition: background 0.15s; }
+        .btn-primary { background: var(--accent); color: #0f172a; }
+        .btn-primary:hover { background: var(--accent-hover); }
+        .btn-danger { background: var(--danger); color: white; }
+        .btn-secondary { background: #334155; color: white; }
+        .btn-secondary:hover { background: #475569; }
+        .info-panel { font-size: 0.85rem; color: var(--text-secondary); margin-top: 0.5rem; }
+        .log-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; }
+        .log-box { height: 380px; overflow-y: auto; background: #0b1120; border: 1px solid var(--border); border-radius: 0.5rem; padding: 1rem; font-family: monospace; font-size: 0.85rem; display: flex; flex-direction: column; gap: 0.75rem; }
+        .log-entry { padding: 0.75rem; border-radius: 0.375rem; border-left: 4px solid var(--border); background: #131c2e; }
+        .log-high { border-left-color: var(--danger); }
+        .log-medium { border-left-color: var(--warning); }
+        .log-low { border-left-color: var(--accent); }
+        .log-sys { border-left-color: #64748b; color: #94a3b8; }
+        .log-time { font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.25rem; }
+        pre { white-space: pre-wrap; word-break: break-all; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <div>
+            <h1>MedNexa Real-Time WebSocket Tester</h1>
+            <div class="info-panel">Demonstrates JWT-authenticated, role-isolated WebSocket feeds (Dev Only).</div>
+        </div>
+        <div>
+            <span id="statusBadge" class="badge status-disconnected">Disconnected</span>
+        </div>
+    </header>
+
+    <div class="card">
+        <div class="grid">
+            <div>
+                <label for="username">Username</label>
+                <input type="text" id="username" value="dr_smith" placeholder="e.g. dr_smith or patient_alice">
+            </div>
+            <div>
+                <label for="password">Password</label>
+                <input type="password" id="password" value="DoctorPass123!">
+            </div>
+        </div>
+        <div class="actions">
+            <button id="connectBtn" class="btn-primary" onclick="loginAndConnect()">Login & Connect</button>
+            <button id="disconnectBtn" class="btn-danger" onclick="disconnectSocket()" disabled>Disconnect</button>
+        </div>
+        <div id="connInfo" class="info-panel" style="margin-top: 0.75rem;"></div>
+    </div>
+
+    <div class="card">
+        <div class="log-header">
+            <strong style="color: var(--accent);">Live Stream Feed</strong>
+            <button class="btn-secondary" style="padding: 0.3rem 0.75rem; font-size: 0.8rem;" onclick="clearLogs()">Clear</button>
+        </div>
+        <div id="logBox" class="log-box">
+            <div class="log-entry log-sys">
+                Ready to authenticate. Enter credentials and click "Login & Connect".
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let socket = null;
+    let currentUser = null;
+
+    function setStatus(status, text) {
+        const badge = document.getElementById("statusBadge");
+        badge.className = "badge status-" + status;
+        badge.textContent = text;
+    }
+
+    function appendLog(message, type = "sys", meta = null) {
+        const logBox = document.getElementById("logBox");
+        const entry = document.createElement("div");
+        entry.className = "log-entry log-" + type;
+        
+        const timeStr = new Date().toLocaleTimeString();
+        let html = `<div class="log-time">${timeStr}</div>`;
+        if (typeof message === "object") {
+            html += `<pre>${JSON.stringify(message, null, 2)}</pre>`;
+        } else {
+            html += `<div>${message}</div>`;
+        }
+        entry.innerHTML = html;
+        logBox.appendChild(entry);
+        logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function clearLogs() {
+        document.getElementById("logBox").innerHTML = "";
+    }
+
+    async function loginAndConnect() {
+        const username = document.getElementById("username").value.trim();
+        const password = document.getElementById("password").value;
+        const connInfo = document.getElementById("connInfo");
+
+        if (!username || !password) {
+            alert("Please enter both username and password.");
+            return;
+        }
+
+        setStatus("connecting", "Authenticating...");
+        appendLog(`Authenticating as user: ${username}...`, "sys");
+
+        try {
+            // 1. Obtain JWT access token
+            const tokenRes = await fetch("/api/token/", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username, password })
+            });
+
+            if (!tokenRes.ok) {
+                const err = await tokenRes.json();
+                throw new Error("Authentication failed: " + (err.detail || JSON.stringify(err)));
+            }
+
+            const tokenData = await tokenRes.json();
+            const token = tokenData.access;
+
+            // 2. Query /api/auth/me/ to get role and profiles
+            const meRes = await fetch("/api/auth/me/", {
+                headers: { "Authorization": `Bearer ${token}` }
+            });
+            if (!meRes.ok) throw new Error("Failed to fetch /api/auth/me/");
+            currentUser = await meRes.json();
+
+            appendLog(`Authenticated: ${currentUser.username} (Role: ${currentUser.role}, ID: ${currentUser.id})`, "sys");
+
+            // 3. Connect to appropriate WebSocket route
+            const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+            let wsPath = "";
+
+            if (currentUser.role === "doctor") {
+                wsPath = `/ws/alerts/?token=${token}`;
+                connInfo.textContent = `Connected as Doctor #${currentUser.id} -> listening on doctor_${currentUser.id}_alerts`;
+            } else if (currentUser.role === "patient") {
+                wsPath = `/ws/notifications/?token=${token}`;
+                connInfo.textContent = `Connected as Patient Profile #${currentUser.patient_profile_id} -> listening on patient_${currentUser.patient_profile_id}_notifications`;
+            } else {
+                throw new Error(`Unsupported role '${currentUser.role}' for WebSocket feeds.`);
+            }
+
+            const wsUrl = `${protocol}//${window.location.host}${wsPath}`;
+            appendLog(`Opening WebSocket connection to ${wsUrl.split('?')[0]}...`, "sys");
+
+            socket = new WebSocket(wsUrl);
+
+            socket.onopen = function () {
+                setStatus("connected", "Connected");
+                appendLog("WebSocket connection established successfully.", "sys");
+                document.getElementById("connectBtn").disabled = true;
+                document.getElementById("disconnectBtn").disabled = false;
+            };
+
+            socket.onmessage = function (event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    const severity = data.severity || "low";
+                    appendLog(data, severity);
+                } catch (e) {
+                    appendLog(event.data, "low");
+                }
+            };
+
+            socket.onerror = function (err) {
+                appendLog("WebSocket error occurred.", "sys");
+            };
+
+            socket.onclose = function (event) {
+                setStatus("disconnected", "Disconnected");
+                appendLog(`WebSocket closed. Code: ${event.code} (Reason: ${event.reason || "None"})`, "sys");
+                document.getElementById("connectBtn").disabled = false;
+                document.getElementById("disconnectBtn").disabled = true;
+                connInfo.textContent = "";
+            };
+
+        } catch (error) {
+            setStatus("disconnected", "Failed");
+            appendLog("Error: " + error.message, "high");
+        }
+    }
+
+    function disconnectSocket() {
+        if (socket) {
+            socket.close();
+            socket = null;
+        }
+    }
+</script>
+</body>
+</html>

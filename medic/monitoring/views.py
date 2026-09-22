@@ -128,4 +128,7 @@ class WoundImageFileStreamView(APIView):
             raise Http404("Image file not found on disk.")
 
         content_type, _ = mimetypes.guess_type(wound.image.path)
-        return FileResponse(open(wound.image.path, "rb"), content_type=content_type or "image/jpeg")
+        response = FileResponse(open(wound.image.path, "rb"), content_type=content_type or "image/jpeg")
+        response["Cache-Control"] = "private, no-store"
+        response["X-Content-Type-Options"] = "nosniff"
+        return response

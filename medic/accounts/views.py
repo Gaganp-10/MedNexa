@@ -211,3 +211,78 @@ class PatientRiskPredictionView(APIView):
             "has_health_logs": latest_log is not None,
             "has_wound_images": latest_wound is not None,
         })
+
+
+class AuthMeView(APIView):
+    """
+    Returns identity and role profile metadata for the authenticated caller.
+    - Role, user id, username
+    - For patients: patient_profile_id and assigned doctor (id, name)
+    - For doctors: doctor_profile_id
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        data = {
+            "id": user.id,
+            "username": user.username,
+            "role": user.role,
+        }
+
+        if user.role == "patient":
+            patient_profile = getattr(user, "patientprofile", None)
+            data["patient_profile_id"] = patient_profile.id if patient_profile else None
+            if patient_profile and patient_profile.doctor:
+                doc = patient_profile.doctor
+                data["assigned_doctor"] = {
+                    "id": doc.id,
+                    "name": doc.get_full_name() or doc.username,
+                }
+            else:
+                data["assigned_doctor"] = None
+        elif user.role == "doctor":
+            doctor_profile = getattr(user, "doctorprofile", None)
+            data["doctor_profile_id"] = doctor_profile.id if doctor_profile else None
+
+        return Response(data)
+
+
+class PatientProfileMeView(APIView):
+    """
+    Convenience/equivalent profile endpoint for patients.
+    Returns patient profile information for the authenticated patient.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role != "patient":
+            return Response(
+                {"detail": "Only patient accounts can access this profile endpoint."},
+                status=403
+            )
+
+        patient_profile = getattr(request.user, "patientprofile", None)
+        if not patient_profile:
+            return Response(
+                {"detail": "Patient profile not found."},
+                status=404
+            )
+
+        doctor_info = None
+        if patient_profile.doctor:
+            doc = patient_profile.doctor
+            doctor_info = {
+                "id": doc.id,
+                "name": doc.get_full_name() or doc.username,
+            }
+
+        return Response({
+            "id": request.user.id,
+            "username": request.user.username,
+            "role": request.user.role,
+            "patient_profile_id": patient_profile.id,
+            "surgery_type": patient_profile.surgery_type,
+            "surgery_date": str(patient_profile.surgery_date),
+            "assigned_doctor": doctor_info,
+        })

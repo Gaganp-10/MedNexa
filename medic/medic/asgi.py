@@ -12,6 +12,7 @@ from channels.routing import ProtocolTypeRouter, URLRouter
 from django.core.asgi import get_asgi_application
 from django.urls import path
 from alerts.consumers import AlertConsumer, PatientNotificationConsumer
+from communication.consumers import ChatConsumer
 from alerts.ws_auth import JWTAuthMiddleware
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'medic.settings')
@@ -24,6 +25,7 @@ application = ProtocolTypeRouter({
         URLRouter([
             path("ws/alerts/", AlertConsumer.as_asgi()),
             path("ws/notifications/", PatientNotificationConsumer.as_asgi()),
+            path("ws/chat/<int:conversation_id>/", ChatConsumer.as_asgi()),
         ])
     ),
 })

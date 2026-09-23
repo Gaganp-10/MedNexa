@@ -1,6 +1,8 @@
 import os
 from PIL import Image as PILImage
 from rest_framework import serializers
+from drf_spectacular.utils import extend_schema_field
+from drf_spectacular.openapi import OpenApiTypes
 from .models import DailyHealthLog, WoundImage
 
 MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
@@ -59,6 +61,7 @@ class WoundImageSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id", "patient", "analysis_result", "uploaded_at", "file_url"]
 
+    @extend_schema_field(OpenApiTypes.URI)
     def get_file_url(self, obj):
         request = self.context.get("request")
         relative_url = f"/api/wound/images/{obj.id}/file/"

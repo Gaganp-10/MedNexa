@@ -5,6 +5,7 @@ from rest_framework import generics, serializers, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse, OpenApiTypes
 
 from accounts.permissions import IsDoctor, IsPatient
 from accounts.access import get_accessible_patient
@@ -17,6 +18,20 @@ from .serializers import (
 from .services import generate_upcoming_doses, calculate_patient_adherence
 
 
+@extend_schema(
+    summary="Prescribe Medication (Doctor)",
+    description=(
+        "Allows a doctor to prescribe medication for their assigned patient. "
+        "Validates assignment using get_accessible_patient. "
+        "Immediately generates upcoming doses for the next 7 days."
+    ),
+    request=MedicationSerializer,
+    responses={
+        201: MedicationSerializer,
+        400: OpenApiResponse(description="Missing patient_id or invalid fields"),
+        404: OpenApiResponse(description="Patient not found or not assigned to this doctor"),
+    }
+)
 class CreateMedicationView(generics.CreateAPIView):
     """
     Allows a doctor to prescribe medication for their assigned patients.
@@ -43,6 +58,26 @@ class CreateMedicationView(generics.CreateAPIView):
         generate_upcoming_doses(medication, days=7)
 
 
+@extend_schema(
+    summary="List Patient Medications",
+    description=(
+        "Lists all medications prescribed for a specific patient. "
+        "Accessible to the patient themselves, their assigned doctor, or an admin. "
+        "Returns 404 for unauthorized access to prevent existence enumeration."
+    ),
+    parameters=[
+        OpenApiParameter(
+            name="patient_id",
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.PATH,
+            description="PatientProfile.id (primary key of PatientProfile)"
+        )
+    ],
+    responses={
+        200: MedicationSerializer(many=True),
+        404: OpenApiResponse(description="Patient not found or unauthorized"),
+    }
+)
 class MedicationListView(generics.ListAPIView):
     """
     Lists medications for a specific patient.
@@ -58,6 +93,28 @@ class MedicationListView(generics.ListAPIView):
         return Medication.objects.filter(patient=patient_profile).order_by("-created_at")
 
 
+@extend_schema(
+    summary="Update Medication Taken Status (Legacy)",
+    description=(
+        "Legacy endpoint for a patient to mark a medication prescription as taken. "
+        "Synchronizes today's dose record to 'taken'. "
+        "For per-dose recording, prefer PATCH /api/medication/doses/<dose_id>/take/."
+    ),
+    parameters=[
+        OpenApiParameter(
+            name="medication_id",
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.PATH,
+            description="Medication primary key"
+        )
+    ],
+    request=MedicationStatusUpdateSerializer,
+    responses={
+        200: MedicationSerializer,
+        403: OpenApiResponse(description="Caller is not a patient"),
+        404: OpenApiResponse(description="Medication not found or not owned by caller"),
+    }
+)
 class MedicationStatusUpdateView(generics.UpdateAPIView):
     """
     Legacy endpoint for patient updating taken_status of their own prescribed medication.
@@ -107,6 +164,17 @@ class MedicationStatusUpdateView(generics.UpdateAPIView):
         return Response(MedicationSerializer(medication).data)
 
 
+@extend_schema(
+    summary="Get Today's Scheduled Doses",
+    description=(
+        "Returns all medication doses scheduled for today (00:00–23:59 local time) "
+        "for the authenticated patient. Patient identity derived from request.user."
+    ),
+    responses={
+        200: MedicationDoseSerializer(many=True),
+        403: OpenApiResponse(description="Caller is not a patient"),
+    }
+)
 class PatientTodayDosesView(APIView):
     """
     Returns all medication doses scheduled for today for the authenticated patient.
@@ -129,6 +197,27 @@ class PatientTodayDosesView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+@extend_schema(
+    summary="Get Upcoming Scheduled Doses",
+    description=(
+        "Returns upcoming scheduled doses for the authenticated patient. "
+        "Optional `days` query parameter (default: 7) controls the look-ahead window. "
+        "Patient identity derived from request.user — no patient ID required."
+    ),
+    parameters=[
+        OpenApiParameter(
+            name="days",
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.QUERY,
+            description="Look-ahead window in days (default: 7)",
+            required=False,
+        )
+    ],
+    responses={
+        200: MedicationDoseSerializer(many=True),
+        403: OpenApiResponse(description="Caller is not a patient"),
+    }
+)
 class PatientUpcomingDosesView(APIView):
     """
     Returns upcoming scheduled doses for the authenticated patient.
@@ -159,6 +248,27 @@ class PatientUpcomingDosesView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+@extend_schema(
+    summary="Mark Dose as Taken",
+    description=(
+        "Marks a specific scheduled medication dose as taken. "
+        "Restricted to patients only. Patient must own this dose. "
+        "Returns 403 if caller is a doctor; 404 if dose not found or not owned."
+    ),
+    parameters=[
+        OpenApiParameter(
+            name="dose_id",
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.PATH,
+            description="MedicationDose primary key"
+        )
+    ],
+    responses={
+        200: MedicationDoseSerializer,
+        403: OpenApiResponse(description="Caller is a doctor (not allowed)"),
+        404: OpenApiResponse(description="Dose not found or not owned by caller"),
+    }
+)
 class TakeDoseView(APIView):
     """
     Marks a scheduled dose as taken.
@@ -166,6 +276,7 @@ class TakeDoseView(APIView):
     Derives patient identity strictly from request.user.
     """
     permission_classes = [IsAuthenticated]
+    serializer_class = MedicationDoseSerializer  # hint for drf-spectacular
 
     def patch(self, request, dose_id):
         if request.user.role != "patient":
@@ -199,6 +310,34 @@ class TakeDoseView(APIView):
         return Response(MedicationDoseSerializer(dose).data, status=status.HTTP_200_OK)
 
 
+@extend_schema(
+    summary="Get Patient Medication Adherence",
+    description=(
+        "Returns a detailed medication adherence summary for a specific patient. "
+        "Accessible to the patient themselves, their assigned doctor, or an admin. "
+        "Optional `days` query parameter (default: 7) sets the reporting window. "
+        "Returns 404 for unauthorized access to prevent existence enumeration."
+    ),
+    parameters=[
+        OpenApiParameter(
+            name="patient_id",
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.PATH,
+            description="PatientProfile.id (primary key of PatientProfile)"
+        ),
+        OpenApiParameter(
+            name="days",
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.QUERY,
+            description="Reporting window in days (default: 7)",
+            required=False,
+        )
+    ],
+    responses={
+        200: OpenApiResponse(description="Adherence summary with taken/missed/pending counts and percentage"),
+        404: OpenApiResponse(description="Patient not found or unauthorized"),
+    }
+)
 class PatientMedicationAdherenceView(APIView):
     """
     Detailed medication adherence summary for a specific patient.

@@ -3,12 +3,35 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse, OpenApiTypes
 
 from .models import Alert
 from .serializers import AlertReadUpdateSerializer
 from accounts.access import get_accessible_patient
 
 
+@extend_schema(
+    summary="Mark Alert as Read (Doctor)",
+    description=(
+        "Marks a system alert as read. "
+        "Only the currently assigned doctor of the alert's patient may update an alert. "
+        "Superusers may also update. Patients cannot mark alerts read. "
+        "Returns 404 (not 403) for any unauthorized caller to prevent existence enumeration."
+    ),
+    parameters=[
+        OpenApiParameter(
+            name="alert_id",
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.PATH,
+            description="Alert primary key"
+        )
+    ],
+    request=AlertReadUpdateSerializer,
+    responses={
+        200: AlertReadUpdateSerializer,
+        404: OpenApiResponse(description="Alert not found or caller is not the assigned doctor"),
+    }
+)
 class AlertMarkReadView(APIView):
     """
     Allows only the assigned doctor of an alert's patient to mark the alert as read.

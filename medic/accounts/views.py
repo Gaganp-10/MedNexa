@@ -5,9 +5,17 @@ from rest_framework import generics
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes, OpenApiResponse
 
 from .models import PatientProfile
-from .serializers import PatientProfileSerializer
+from .serializers import (
+    PatientProfileSerializer,
+    AuthMeResponseSerializer,
+    PatientProfileMeResponseSerializer,
+    RiskPredictionResponseSerializer,
+    RecoveryTrendItemSerializer,
+    PatientAlertSummarySerializer,
+)
 from .permissions import IsDoctor
 from .access import get_accessible_patient
 from monitoring.models import DailyHealthLog, WoundImage
@@ -17,10 +25,16 @@ from alerts.models import Alert
 from medication.models import Medication
 
 
+@extend_schema(
+    summary="List Assigned Patients",
+    description="Returns list of patients currently assigned to the calling authenticated doctor.",
+    responses={
+        200: PatientProfileSerializer(many=True),
+        401: OpenApiResponse(description="Unauthenticated"),
+        403: OpenApiResponse(description="Caller is not a doctor"),
+    }
+)
 class DoctorPatientsView(generics.ListAPIView):
-    """
-    Returns list of patients assigned to the calling authenticated doctor.
-    """
     permission_classes = [IsAuthenticated, IsDoctor]
     serializer_class = PatientProfileSerializer
 
@@ -30,13 +44,23 @@ class DoctorPatientsView(generics.ListAPIView):
         ).select_related("user", "doctor").order_by("id")
 
 
+@extend_schema(
+    summary="Doctor Dashboard Overview",
+    description=(
+        "Returns a comprehensive post-surgery overview for the authenticated doctor. "
+        "Includes each assigned patient's latest vitals, wound analysis results, "
+        "prototype risk predictions, and 7-day medication adherence metrics. "
+        "Outputs are prototype decision-support indicators, not diagnostic findings."
+    ),
+    responses={
+        200: OpenApiResponse(
+            description="Comprehensive doctor overview with patient summaries"
+        ),
+        401: OpenApiResponse(description="Unauthenticated"),
+        403: OpenApiResponse(description="Caller is not a doctor"),
+    }
+)
 class DoctorOverviewView(APIView):
-    """
-    Returns a comprehensive post-surgery overview for the authenticated doctor.
-    Derives doctor identity from request.user.
-    Uses select_related and prefetch_related to eliminate N+1 queries.
-    Handles empty patient states gracefully.
-    """
     permission_classes = [IsAuthenticated, IsDoctor]
 
     def get(self, request):
@@ -53,7 +77,6 @@ class DoctorOverviewView(APIView):
         window_start = now - datetime.timedelta(days=7)
 
         for p in patients:
-            # Prefetched querysets
             logs = list(p.health_logs.all())
             wounds = list(p.wound_images.all())
             alerts = list(p.alerts.all())
@@ -62,12 +85,10 @@ class DoctorOverviewView(APIView):
             latest_log = logs[0] if logs else None
             latest_wound = wounds[0] if wounds else None
 
-            # Calculate risk and recovery
             wound_res = latest_wound.analysis_result if latest_wound else ""
             risk_indicator = predict_patient_risk(latest_log, wound_res)
             latest_recovery_score = latest_log.recovery_score if latest_log else 100
 
-            # Medication adherence computed from MedicationDose
             all_doses = [d for m in meds for d in m.doses.all()]
             due_doses = [d for d in all_doses if d.scheduled_for >= window_start and d.scheduled_for <= now]
 
@@ -126,11 +147,27 @@ class DoctorOverviewView(APIView):
         })
 
 
+@extend_schema(
+    summary="Get Patient Health Logs",
+    description=(
+        "Returns health logs for a specific patient. "
+        "Accessible only to the patient themselves, their currently assigned doctor, or an admin. "
+        "Returns 404 (not 403) for any other caller to prevent existence enumeration."
+    ),
+    parameters=[
+        OpenApiParameter(
+            name="patient_id",
+            type=int,
+            location=OpenApiParameter.PATH,
+            description="PatientProfile.id (primary key of PatientProfile). Enforces ownership/assignment."
+        )
+    ],
+    responses={
+        200: DailyHealthLogSerializer(many=True),
+        404: OpenApiResponse(description="Patient not found or unauthorized"),
+    }
+)
 class PatientHealthLogsView(generics.ListAPIView):
-    """
-    Returns health logs for a specific patient.
-    Accessible only to the patient themselves, their assigned doctor, or superusers.
-    """
     permission_classes = [IsAuthenticated]
     serializer_class = DailyHealthLogSerializer
 
@@ -140,11 +177,27 @@ class PatientHealthLogsView(generics.ListAPIView):
         return DailyHealthLog.objects.filter(patient=patient).select_related("patient__user").order_by("-created_at")
 
 
+@extend_schema(
+    summary="Get Patient Wound Images",
+    description=(
+        "Returns metadata and file URLs for wound images belonging to a specific patient. "
+        "Accessible only to the patient themselves, their currently assigned doctor, or an admin. "
+        "Returns 404 (not 403) for any other caller to prevent existence enumeration."
+    ),
+    parameters=[
+        OpenApiParameter(
+            name="patient_id",
+            type=int,
+            location=OpenApiParameter.PATH,
+            description="PatientProfile.id (primary key of PatientProfile). Enforces ownership/assignment."
+        )
+    ],
+    responses={
+        200: WoundImageSerializer(many=True),
+        404: OpenApiResponse(description="Patient not found or unauthorized"),
+    }
+)
 class PatientWoundImagesView(generics.ListAPIView):
-    """
-    Returns wound image records for a specific patient.
-    Accessible only to the patient themselves, their assigned doctor, or superusers.
-    """
     permission_classes = [IsAuthenticated]
     serializer_class = WoundImageSerializer
 
@@ -154,11 +207,27 @@ class PatientWoundImagesView(generics.ListAPIView):
         return WoundImage.objects.filter(patient=patient).select_related("patient__user").order_by("-uploaded_at")
 
 
+@extend_schema(
+    summary="Get Patient Alerts",
+    description=(
+        "Returns system alerts generated for a specific patient. "
+        "Accessible only to the patient themselves, their currently assigned doctor, or an admin. "
+        "Returns 404 (not 403) for any other caller to prevent existence enumeration."
+    ),
+    parameters=[
+        OpenApiParameter(
+            name="patient_id",
+            type=int,
+            location=OpenApiParameter.PATH,
+            description="PatientProfile.id (primary key of PatientProfile). Enforces ownership/assignment."
+        )
+    ],
+    responses={
+        200: PatientAlertSummarySerializer(many=True),
+        404: OpenApiResponse(description="Patient not found or unauthorized"),
+    }
+)
 class PatientAlertsView(APIView):
-    """
-    Returns alerts for a specific patient.
-    Accessible only to the patient themselves, their assigned doctor, or superusers.
-    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request, patient_id):
@@ -177,12 +246,27 @@ class PatientAlertsView(APIView):
         return Response(data)
 
 
+@extend_schema(
+    summary="Get Patient Recovery Trend",
+    description=(
+        "Returns chronological recovery scores for a specific patient over time. "
+        "Accessible only to the patient themselves, their currently assigned doctor, or an admin. "
+        "Returns 404 (not 403) for any other caller to prevent existence enumeration."
+    ),
+    parameters=[
+        OpenApiParameter(
+            name="patient_id",
+            type=int,
+            location=OpenApiParameter.PATH,
+            description="PatientProfile.id (primary key of PatientProfile). Enforces ownership/assignment."
+        )
+    ],
+    responses={
+        200: RecoveryTrendItemSerializer(many=True),
+        404: OpenApiResponse(description="Patient not found or unauthorized"),
+    }
+)
 class PatientRecoveryTrendView(APIView):
-    """
-    Returns the historical recovery scores for a specific patient.
-    Accessible only to the patient themselves, their assigned doctor, or superusers.
-    Handles empty state without error.
-    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request, patient_id):
@@ -199,12 +283,28 @@ class PatientRecoveryTrendView(APIView):
         return Response(data)
 
 
+@extend_schema(
+    summary="Get Patient Risk Prediction",
+    description=(
+        "Returns prototype clinical decision-support risk indicator for a specific patient. "
+        "MEDICAL SAFETY NOTICE: This is a prototype decision-support heuristic, NOT a diagnostic finding. "
+        "Accessible only to the patient themselves, their currently assigned doctor, or an admin. "
+        "Returns 404 (not 403) for any other caller to prevent existence enumeration."
+    ),
+    parameters=[
+        OpenApiParameter(
+            name="patient_id",
+            type=int,
+            location=OpenApiParameter.PATH,
+            description="PatientProfile.id (primary key of PatientProfile). Enforces ownership/assignment."
+        )
+    ],
+    responses={
+        200: RiskPredictionResponseSerializer,
+        404: OpenApiResponse(description="Patient not found or unauthorized"),
+    }
+)
 class PatientRiskPredictionView(APIView):
-    """
-    Returns current prototype risk assessment indicator for a specific patient.
-    Accessible only to the patient themselves, their assigned doctor, or superusers.
-    Handles empty state gracefully.
-    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request, patient_id):
@@ -224,13 +324,20 @@ class PatientRiskPredictionView(APIView):
         })
 
 
+@extend_schema(
+    summary="Get Current User Profile & Role Metadata",
+    description=(
+        "Returns identity and role profile metadata for the authenticated caller.\n"
+        "- Common fields: id, username, role ('doctor' or 'patient')\n"
+        "- For patients: patient_profile_id and assigned_doctor (id, name)\n"
+        "- For doctors: doctor_profile_id"
+    ),
+    responses={
+        200: AuthMeResponseSerializer,
+        401: OpenApiResponse(description="Unauthenticated"),
+    }
+)
 class AuthMeView(APIView):
-    """
-    Returns identity and role profile metadata for the authenticated caller.
-    - Role, user id, username
-    - For patients: patient_profile_id and assigned doctor (id, name)
-    - For doctors: doctor_profile_id
-    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -259,11 +366,17 @@ class AuthMeView(APIView):
         return Response(data)
 
 
+@extend_schema(
+    summary="Get Patient Profile (Self)",
+    description="Convenience endpoint for authenticated patients to retrieve their own post-surgery profile and assigned doctor.",
+    responses={
+        200: PatientProfileMeResponseSerializer,
+        401: OpenApiResponse(description="Unauthenticated"),
+        403: OpenApiResponse(description="Caller is not a patient"),
+        404: OpenApiResponse(description="Patient profile not found"),
+    }
+)
 class PatientProfileMeView(APIView):
-    """
-    Convenience/equivalent profile endpoint for patients.
-    Returns patient profile information for the authenticated patient.
-    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):

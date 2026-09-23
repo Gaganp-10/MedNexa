@@ -40,6 +40,7 @@ INSTALLED_APPS = [
 
     'rest_framework',
     'channels',
+    'drf_spectacular',
 
     'accounts',
     'monitoring',
@@ -141,6 +142,90 @@ REST_FRAMEWORK = {
         'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 10,
     'EXCEPTION_HANDLER': 'medic.exceptions.custom_exception_handler',
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'MEDIC API',
+    'DESCRIPTION': (
+        "## MEDICAL SAFETY NOTICE\n"
+        "This system is a prototype clinical decision-support notification tool, NOT a diagnostic system. "
+        "Outputs such as risk indicators, vital threshold alerts, and wound analysis are decision-support "
+        "heuristics and are NOT clinically validated diagnostic findings. They are designed exclusively to "
+        "prompt clinical review by the assigned healthcare team.\n\n"
+        "## Timezone & Timestamps\n"
+        "All timestamps across the API and database are timezone-aware and localized to Asia/Kolkata (IST).\n\n"
+        "## Authorization & Privacy Model\n"
+        "All patient-scoped endpoints enforce strict ownership and doctor-patient assignment checks. "
+        "To avoid disclosing patient existence or confirming resource records to unauthorized callers, "
+        "unauthorized access attempts return HTTP 404 Not Found (rather than 403 Forbidden).\n\n"
+        "## Global Authentication\n"
+        "All protected endpoints require Bearer JWT authentication via the HTTP Authorization header:\n"
+        "`Authorization: Bearer <access_token>`\n\n"
+        "- Obtain token pair: `POST /api/token/` with `{\"username\": ..., \"password\": ...}`\n"
+        "- Refresh access token: `POST /api/token/refresh/` with `{\"refresh\": ...}`\n\n"
+        "## Real-Time WebSocket Channels\n"
+        "WebSockets authenticate via JWT passed as a query string parameter (`?token=<jwt_access_token>`). "
+        "Connections without valid tokens close with code 4401. Unauthorized role or non-participant connections close with code 4403.\n\n"
+        "1. **Doctor Alerts Channel**: `ws/alerts/?token=<token>`\n"
+        "   - Target: Authenticated doctors with active DoctorProfile.\n"
+        "   - Channel Group: `doctor_<doctor_user_id>_alerts`\n"
+        "   - Dispatched events: Vital threshold alerts, medication missed dose alerts, and new patient chat message alerts.\n"
+        "   - Payload format:\n"
+        "     ```json\n"
+        "     {\n"
+        "       \"id\": 12,\n"
+        "       \"patient_id\": 3,\n"
+        "       \"patient_display_name\": \"Jane Doe\",\n"
+        "       \"severity\": \"high\",\n"
+        "       \"message\": \"High fever detected: 39.5 C\",\n"
+        "       \"created_at\": \"2026-03-24T10:00:00+05:30\"\n"
+        "     }\n"
+        "     ```\n\n"
+        "2. **Patient Notifications Channel**: `ws/notifications/?token=<token>`\n"
+        "   - Target: Authenticated patients with active PatientProfile.\n"
+        "   - Channel Group: `patient_<patient_profile_id>_notifications`\n"
+        "   - Dispatched events: Scheduled medication dose reminders and new doctor chat messages.\n"
+        "   - Payload format:\n"
+        "     ```json\n"
+        "     {\n"
+        "       \"type\": \"medication_reminder\",\n"
+        "       \"dose_id\": 45,\n"
+        "       \"medicine_name\": \"Amoxicillin\",\n"
+        "       \"dosage\": \"500mg\",\n"
+        "       \"scheduled_time\": \"08:00 PM\",\n"
+        "       \"message\": \"Time for Amoxicillin (500mg) at 08:00 PM.\",\n"
+        "       \"created_at\": \"2026-03-24T19:55:00+05:30\"\n"
+        "     }\n"
+        "     ```\n\n"
+        "3. **Doctor-Patient Chat Channel**: `ws/chat/<conversation_id>/?token=<token>`\n"
+        "   - Target: Authenticated doctor or patient participating in the active conversation.\n"
+        "   - Channel Group: `chat_<conversation_id>`\n"
+        "   - Messages sent/received:\n"
+        "     ```json\n"
+        "     {\n"
+        "       \"id\": 101,\n"
+        "       \"conversation_id\": 1,\n"
+        "       \"sender_id\": 2,\n"
+        "       \"sender_name\": \"Dr. John Smith\",\n"
+        "       \"sender_role\": \"doctor\",\n"
+        "       \"content\": \"How is your incision healing today?\",\n"
+        "       \"is_read\": false,\n"
+        "       \"created_at\": \"2026-03-24T10:15:00+05:30\"\n"
+        "     }\n"
+        "     ```\n\n"
+        "## Lovable Frontend Integration Guide\n"
+        "- **Base API URL**: `http://<backend-host>:8000/api/`\n"
+        "- **Default Headers**: `Authorization: Bearer <access_token>`, `Content-Type: application/json` (except file uploads which use `multipart/form-data`)\n"
+        "- **WebSocket Base**: `ws://<backend-host>:8000/` (use `wss://` in production with TLS)\n"
+        "- **CORS Notice**: Full CORS configuration is scheduled for Phase 8. When developing the Lovable frontend separately, configure a development proxy or enable cross-origin headers during local testing."
+    ),
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'COMPONENT_SPLIT_REQUEST': True,
+    # NOTE: In development Swagger UI is accessible publicly.
+    # Restrict to ['rest_framework.permissions.IsAdminUser'] before deploying to production.
+    'SERVE_PERMISSIONS': ['rest_framework.permissions.AllowAny'],
 }
 
 import sys

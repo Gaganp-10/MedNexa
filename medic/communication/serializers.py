@@ -1,4 +1,6 @@
 from rest_framework import serializers
+from drf_spectacular.utils import extend_schema_field
+from drf_spectacular.openapi import OpenApiTypes
 from .models import Conversation, Message
 
 
@@ -35,6 +37,7 @@ class MessageSerializer(serializers.ModelSerializer):
             "created_at",
         ]
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_sender_name(self, obj):
         return obj.sender.get_full_name() or obj.sender.username
 
@@ -70,12 +73,15 @@ class ConversationSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_doctor_name(self, obj):
         return obj.doctor.get_full_name() or obj.doctor.username
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_patient_name(self, obj):
         return obj.patient.user.get_full_name() or obj.patient.user.username
 
+    @extend_schema_field(OpenApiTypes.OBJECT)
     def get_last_message(self, obj):
         latest = obj.messages.order_by("-created_at").first()
         if not latest:
@@ -89,6 +95,7 @@ class ConversationSerializer(serializers.ModelSerializer):
             "created_at": latest.created_at.isoformat(),
         }
 
+    @extend_schema_field(OpenApiTypes.INT)
     def get_unread_count(self, obj):
         request = self.context.get("request")
         if not request or not request.user or not request.user.is_authenticated:

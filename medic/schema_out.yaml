@@ -1,0 +1,1691 @@
+openapi: 3.0.3
+info:
+  title: MEDIC API
+  version: 1.0.0
+  description: |-
+    ## MEDICAL SAFETY NOTICE
+    This system is a prototype clinical decision-support notification tool, NOT a diagnostic system. Outputs such as risk indicators, vital threshold alerts, and wound analysis are decision-support heuristics and are NOT clinically validated diagnostic findings. They are designed exclusively to prompt clinical review by the assigned healthcare team.
+
+    ## Timezone & Timestamps
+    All timestamps across the API and database are timezone-aware and localized to Asia/Kolkata (IST).
+
+    ## Authorization & Privacy Model
+    All patient-scoped endpoints enforce strict ownership and doctor-patient assignment checks. To avoid disclosing patient existence or confirming resource records to unauthorized callers, unauthorized access attempts return HTTP 404 Not Found (rather than 403 Forbidden).
+
+    ## Global Authentication
+    All protected endpoints require Bearer JWT authentication via the HTTP Authorization header:
+    `Authorization: Bearer <access_token>`
+
+    - Obtain token pair: `POST /api/token/` with `{"username": ..., "password": ...}`
+    - Refresh access token: `POST /api/token/refresh/` with `{"refresh": ...}`
+
+    ## Real-Time WebSocket Channels
+    WebSockets authenticate via JWT passed as a query string parameter (`?token=<jwt_access_token>`). Connections without valid tokens close with code 4401. Unauthorized role or non-participant connections close with code 4403.
+
+    1. **Doctor Alerts Channel**: `ws/alerts/?token=<token>`
+       - Target: Authenticated doctors with active DoctorProfile.
+       - Channel Group: `doctor_<doctor_user_id>_alerts`
+       - Dispatched events: Vital threshold alerts, medication missed dose alerts, and new patient chat message alerts.
+       - Payload format:
+         ```json
+         {
+           "id": 12,
+           "patient_id": 3,
+           "patient_display_name": "Jane Doe",
+           "severity": "high",
+           "message": "High fever detected: 39.5 C",
+           "created_at": "2026-03-24T10:00:00+05:30"
+         }
+         ```
+
+    2. **Patient Notifications Channel**: `ws/notifications/?token=<token>`
+       - Target: Authenticated patients with active PatientProfile.
+       - Channel Group: `patient_<patient_profile_id>_notifications`
+       - Dispatched events: Scheduled medication dose reminders and new doctor chat messages.
+       - Payload format:
+         ```json
+         {
+           "type": "medication_reminder",
+           "dose_id": 45,
+           "medicine_name": "Amoxicillin",
+           "dosage": "500mg",
+           "scheduled_time": "08:00 PM",
+           "message": "Time for Amoxicillin (500mg) at 08:00 PM.",
+           "created_at": "2026-03-24T19:55:00+05:30"
+         }
+         ```
+
+    3. **Doctor-Patient Chat Channel**: `ws/chat/<conversation_id>/?token=<token>`
+       - Target: Authenticated doctor or patient participating in the active conversation.
+       - Channel Group: `chat_<conversation_id>`
+       - Messages sent/received:
+         ```json
+         {
+           "id": 101,
+           "conversation_id": 1,
+           "sender_id": 2,
+           "sender_name": "Dr. John Smith",
+           "sender_role": "doctor",
+           "content": "How is your incision healing today?",
+           "is_read": false,
+           "created_at": "2026-03-24T10:15:00+05:30"
+         }
+         ```
+
+    ## Lovable Frontend Integration Guide
+    - **Base API URL**: `http://<backend-host>:8000/api/`
+    - **Default Headers**: `Authorization: Bearer <access_token>`, `Content-Type: application/json` (except file uploads which use `multipart/form-data`)
+    - **WebSocket Base**: `ws://<backend-host>:8000/` (use `wss://` in production with TLS)
+    - **CORS Notice**: Full CORS configuration is scheduled for Phase 8. When developing the Lovable frontend separately, configure a development proxy or enable cross-origin headers during local testing.
+paths:
+  /api/alerts/{alert_id}/read/:
+    patch:
+      operationId: api_alerts_read_partial_update
+      description: Marks a system alert as read. Only the currently assigned doctor
+        of the alert's patient may update an alert. Superusers may also update. Patients
+        cannot mark alerts read. Returns 404 (not 403) for any unauthorized caller
+        to prevent existence enumeration.
+      summary: Mark Alert as Read (Doctor)
+      parameters:
+      - in: path
+        name: alert_id
+        schema:
+          type: integer
+        description: Alert primary key
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedAlertReadUpdateRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedAlertReadUpdateRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedAlertReadUpdateRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertReadUpdate'
+          description: ''
+        '404':
+          description: Alert not found or caller is not the assigned doctor
+  /api/auth/me/:
+    get:
+      operationId: api_auth_me_retrieve
+      description: |-
+        Returns identity and role profile metadata for the authenticated caller.
+        - Common fields: id, username, role ('doctor' or 'patient')
+        - For patients: patient_profile_id and assigned_doctor (id, name)
+        - For doctors: doctor_profile_id
+      summary: Get Current User Profile & Role Metadata
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthMeResponse'
+          description: ''
+        '401':
+          description: Unauthenticated
+  /api/communication/conversations/:
+    get:
+      operationId: api_communication_conversations_list
+      description: Lists all of the caller's own conversations (as doctor or patient),
+        paginated, ordered by most recently active first. Doctors only see conversations
+        with currently assigned patients. Patients only see their conversation with
+        their currently assigned doctor. Returns an empty list if no conversations
+        exist.
+      summary: List Conversations
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Conversation'
+          description: ''
+        '401':
+          description: Unauthenticated
+    post:
+      operationId: api_communication_conversations_create
+      description: Creates or retrieves a conversation between the caller and their
+        assigned counterpart. If `content` is included in the body, also sends the
+        first message and returns the Message object. If only `patient_id` is provided
+        (doctor caller), creates the conversation and returns the Conversation object.
+        Patients do not need to supply any ID — their assigned doctor is resolved
+        server-side.
+      summary: Create Conversation or Send First Message
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: {}
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: {}
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: {}
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+          description: ''
+        '400':
+          description: Missing patient_id or empty content
+        '404':
+          description: Assigned doctor/patient not found
+  /api/communication/conversations/{id}/messages/:
+    get:
+      operationId: api_communication_conversations_messages_list
+      description: Returns paginated message history for a specific conversation,
+        ordered **oldest-to-newest** (ascending created_at — standard chronological
+        chat order). A conversation with zero messages returns an empty results list
+        (HTTP 200), not an error. Verifies that the caller is a current participant
+        and that the doctor is still assigned.
+      summary: List Conversation Messages
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        required: true
+      - in: path
+        name: pk
+        schema:
+          type: integer
+        description: Conversation.id (primary key)
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Message'
+          description: ''
+        '404':
+          description: Conversation not found or caller is not an active participant
+    post:
+      operationId: api_communication_conversations_messages_create
+      description: "Sends a message to the specified conversation. **Sender is always
+        `request.user` — any `sender` or `sender_id` field in the body is ignored.**
+        Validates that content is non-empty, non-whitespace, and ≤4000 characters.
+        \n\n**Auto-creation on first message**: if `<pk>` is a `PatientProfile.id`
+        (i.e., the conversation doesn't exist yet), the conversation is automatically
+        created before sending the message. This is the recommended way to start a
+        conversation — no separate 'create conversation' step is needed. Once a conversation
+        exists, subsequent POSTs should use the `Conversation.id` returned in the
+        conversations list.\n\nAfter persisting the message, it is broadcast to the
+        `chat_<conversation_id>` WebSocket group and a lightweight notification is
+        dispatched to the recipient's personal channel."
+      summary: Send Message
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        required: true
+      - in: path
+        name: pk
+        schema:
+          type: integer
+        description: '**First message**: pass PatientProfile.id (doctor caller) —
+          conversation is auto-created. **Subsequent messages**: pass Conversation.id
+          from the conversations list.'
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/MessageRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MessageRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+          description: ''
+        '400':
+          description: Empty or whitespace-only message content
+        '404':
+          description: Conversation/patient not found or caller not an active participant
+  /api/communication/messages/{id}/read/:
+    patch:
+      operationId: api_communication_messages_read_partial_update
+      description: Marks a specific message as read (`is_read = true`). **Only the
+        recipient (not the sender) may mark a message read.** If the sender attempts
+        to mark their own message read, 403 Forbidden is returned. If the caller is
+        not a participant, 404 is returned to prevent existence enumeration. If the
+        doctor is no longer assigned to the patient, 404 is returned.
+      summary: Mark Message as Read
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        required: true
+      - in: path
+        name: pk
+        schema:
+          type: integer
+        description: Message primary key
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedMessageRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedMessageRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedMessageRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+          description: ''
+        '403':
+          description: Sender cannot mark their own message as read
+        '404':
+          description: Message not found or caller is not an active participant
+  /api/doctor/overview/:
+    get:
+      operationId: api_doctor_overview_retrieve
+      description: Returns a comprehensive post-surgery overview for the authenticated
+        doctor. Includes each assigned patient's latest vitals, wound analysis results,
+        prototype risk predictions, and 7-day medication adherence metrics. Outputs
+        are prototype decision-support indicators, not diagnostic findings.
+      summary: Doctor Dashboard Overview
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: Comprehensive doctor overview with patient summaries
+        '401':
+          description: Unauthenticated
+        '403':
+          description: Caller is not a doctor
+  /api/doctor/patients/:
+    get:
+      operationId: api_doctor_patients_list
+      description: Returns list of patients currently assigned to the calling authenticated
+        doctor.
+      summary: List Assigned Patients
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedPatientProfileList'
+          description: ''
+        '401':
+          description: Unauthenticated
+        '403':
+          description: Caller is not a doctor
+  /api/health/create/:
+    post:
+      operationId: api_health_create_create
+      description: Creates a new daily health log for the authenticated patient. Patient
+        identity is derived server-side from request.user — no patient_id is accepted
+        in the body. Automatically computes a prototype recovery score and triggers
+        decision-support alert analysis on submission.
+      summary: Submit Daily Health Log
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DailyHealthLogRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/DailyHealthLogRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/DailyHealthLogRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DailyHealthLog'
+          description: ''
+        '400':
+          description: Validation error
+        '403':
+          description: Caller is not a patient
+  /api/health/logs/:
+    get:
+      operationId: api_health_logs_list
+      description: Lists all health logs for the authenticated patient, paginated,
+        newest first. Restricted to patients only; doctors access patient logs via
+        GET /api/patient/<patient_id>/logs/.
+      summary: List Own Health Logs
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedDailyHealthLogList'
+          description: ''
+        '403':
+          description: Caller is not a patient
+  /api/medication/{medication_id}/update/:
+    patch:
+      operationId: api_medication_update_partial_update
+      description: Legacy endpoint for a patient to mark a medication prescription
+        as taken. Synchronizes today's dose record to 'taken'. For per-dose recording,
+        prefer PATCH /api/medication/doses/<dose_id>/take/.
+      summary: Update Medication Taken Status (Legacy)
+      parameters:
+      - in: path
+        name: medication_id
+        schema:
+          type: integer
+        description: Medication primary key
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedMedicationStatusUpdateRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedMedicationStatusUpdateRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedMedicationStatusUpdateRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Medication'
+          description: ''
+        '403':
+          description: Caller is not a patient
+        '404':
+          description: Medication not found or not owned by caller
+  /api/medication/{patient_id}/:
+    get:
+      operationId: api_medication_list
+      description: Lists all medications prescribed for a specific patient. Accessible
+        to the patient themselves, their assigned doctor, or an admin. Returns 404
+        for unauthorized access to prevent existence enumeration.
+      summary: List Patient Medications
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - in: path
+        name: patient_id
+        schema:
+          type: integer
+        description: PatientProfile.id (primary key of PatientProfile)
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedMedicationList'
+          description: ''
+        '404':
+          description: Patient not found or unauthorized
+  /api/medication/create/:
+    post:
+      operationId: api_medication_create_create
+      description: Allows a doctor to prescribe medication for their assigned patient.
+        Validates assignment using get_accessible_patient. Immediately generates upcoming
+        doses for the next 7 days.
+      summary: Prescribe Medication (Doctor)
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MedicationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/MedicationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MedicationRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Medication'
+          description: ''
+        '400':
+          description: Missing patient_id or invalid fields
+        '404':
+          description: Patient not found or not assigned to this doctor
+  /api/medication/doses/{dose_id}/take/:
+    patch:
+      operationId: api_medication_doses_take_partial_update
+      description: Marks a specific scheduled medication dose as taken. Restricted
+        to patients only. Patient must own this dose. Returns 403 if caller is a doctor;
+        404 if dose not found or not owned.
+      summary: Mark Dose as Taken
+      parameters:
+      - in: path
+        name: dose_id
+        schema:
+          type: integer
+        description: MedicationDose primary key
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedMedicationDoseRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedMedicationDoseRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedMedicationDoseRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MedicationDose'
+          description: ''
+        '403':
+          description: Caller is a doctor (not allowed)
+        '404':
+          description: Dose not found or not owned by caller
+  /api/medication/doses/today/:
+    get:
+      operationId: api_medication_doses_today_list
+      description: Returns all medication doses scheduled for today (00:00–23:59 local
+        time) for the authenticated patient. Patient identity derived from request.user.
+      summary: Get Today's Scheduled Doses
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MedicationDose'
+          description: ''
+        '403':
+          description: Caller is not a patient
+  /api/medication/doses/upcoming/:
+    get:
+      operationId: api_medication_doses_upcoming_list
+      description: 'Returns upcoming scheduled doses for the authenticated patient.
+        Optional `days` query parameter (default: 7) controls the look-ahead window.
+        Patient identity derived from request.user — no patient ID required.'
+      summary: Get Upcoming Scheduled Doses
+      parameters:
+      - in: query
+        name: days
+        schema:
+          type: integer
+        description: 'Look-ahead window in days (default: 7)'
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MedicationDose'
+          description: ''
+        '403':
+          description: Caller is not a patient
+  /api/patient/{patient_id}/alerts/:
+    get:
+      operationId: api_patient_alerts_list
+      description: Returns system alerts generated for a specific patient. Accessible
+        only to the patient themselves, their currently assigned doctor, or an admin.
+        Returns 404 (not 403) for any other caller to prevent existence enumeration.
+      summary: Get Patient Alerts
+      parameters:
+      - in: path
+        name: patient_id
+        schema:
+          type: integer
+        description: PatientProfile.id (primary key of PatientProfile). Enforces ownership/assignment.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PatientAlertSummary'
+          description: ''
+        '404':
+          description: Patient not found or unauthorized
+  /api/patient/{patient_id}/logs/:
+    get:
+      operationId: api_patient_logs_list
+      description: Returns health logs for a specific patient. Accessible only to
+        the patient themselves, their currently assigned doctor, or an admin. Returns
+        404 (not 403) for any other caller to prevent existence enumeration.
+      summary: Get Patient Health Logs
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - in: path
+        name: patient_id
+        schema:
+          type: integer
+        description: PatientProfile.id (primary key of PatientProfile). Enforces ownership/assignment.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedDailyHealthLogList'
+          description: ''
+        '404':
+          description: Patient not found or unauthorized
+  /api/patient/{patient_id}/medication-adherence/:
+    get:
+      operationId: api_patient_medication_adherence_retrieve
+      description: 'Returns a detailed medication adherence summary for a specific
+        patient. Accessible to the patient themselves, their assigned doctor, or an
+        admin. Optional `days` query parameter (default: 7) sets the reporting window.
+        Returns 404 for unauthorized access to prevent existence enumeration.'
+      summary: Get Patient Medication Adherence
+      parameters:
+      - in: query
+        name: days
+        schema:
+          type: integer
+        description: 'Reporting window in days (default: 7)'
+      - in: path
+        name: patient_id
+        schema:
+          type: integer
+        description: PatientProfile.id (primary key of PatientProfile)
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: Adherence summary with taken/missed/pending counts and percentage
+        '404':
+          description: Patient not found or unauthorized
+  /api/patient/{patient_id}/recovery-trend/:
+    get:
+      operationId: api_patient_recovery_trend_list
+      description: Returns chronological recovery scores for a specific patient over
+        time. Accessible only to the patient themselves, their currently assigned
+        doctor, or an admin. Returns 404 (not 403) for any other caller to prevent
+        existence enumeration.
+      summary: Get Patient Recovery Trend
+      parameters:
+      - in: path
+        name: patient_id
+        schema:
+          type: integer
+        description: PatientProfile.id (primary key of PatientProfile). Enforces ownership/assignment.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RecoveryTrendItem'
+          description: ''
+        '404':
+          description: Patient not found or unauthorized
+  /api/patient/{patient_id}/risk/:
+    get:
+      operationId: api_patient_risk_retrieve
+      description: 'Returns prototype clinical decision-support risk indicator for
+        a specific patient. MEDICAL SAFETY NOTICE: This is a prototype decision-support
+        heuristic, NOT a diagnostic finding. Accessible only to the patient themselves,
+        their currently assigned doctor, or an admin. Returns 404 (not 403) for any
+        other caller to prevent existence enumeration.'
+      summary: Get Patient Risk Prediction
+      parameters:
+      - in: path
+        name: patient_id
+        schema:
+          type: integer
+        description: PatientProfile.id (primary key of PatientProfile). Enforces ownership/assignment.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskPredictionResponse'
+          description: ''
+        '404':
+          description: Patient not found or unauthorized
+  /api/patient/{patient_id}/wounds/:
+    get:
+      operationId: api_patient_wounds_list
+      description: Returns metadata and file URLs for wound images belonging to a
+        specific patient. Accessible only to the patient themselves, their currently
+        assigned doctor, or an admin. Returns 404 (not 403) for any other caller to
+        prevent existence enumeration.
+      summary: Get Patient Wound Images
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - in: path
+        name: patient_id
+        schema:
+          type: integer
+        description: PatientProfile.id (primary key of PatientProfile). Enforces ownership/assignment.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedWoundImageList'
+          description: ''
+        '404':
+          description: Patient not found or unauthorized
+  /api/patient/profile/:
+    get:
+      operationId: api_patient_profile_retrieve
+      description: Convenience endpoint for authenticated patients to retrieve their
+        own post-surgery profile and assigned doctor.
+      summary: Get Patient Profile (Self)
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PatientProfileMeResponse'
+          description: ''
+        '401':
+          description: Unauthenticated
+        '403':
+          description: Caller is not a patient
+        '404':
+          description: Patient profile not found
+  /api/token/:
+    post:
+      operationId: api_token_create
+      description: |-
+        Takes a set of user credentials and returns an access and refresh JSON web
+        token pair to prove the authentication of those credentials.
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenObtainPairRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenObtainPairRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TokenObtainPairRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenObtainPair'
+          description: ''
+  /api/token/refresh/:
+    post:
+      operationId: api_token_refresh_create
+      description: |-
+        Takes a refresh type JSON web token and returns an access type JSON web
+        token if the refresh token is valid.
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRefreshRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenRefreshRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TokenRefreshRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenRefresh'
+          description: ''
+  /api/wound/images/:
+    get:
+      operationId: api_wound_images_list
+      description: Lists wound image records for the authenticated patient, paginated,
+        newest first. Restricted to patients only; doctors access wound images via
+        GET /api/patient/<patient_id>/wounds/.
+      summary: List Own Wound Images
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedWoundImageList'
+          description: ''
+        '403':
+          description: Caller is not a patient
+  /api/wound/images/{image_id}/file/:
+    get:
+      operationId: api_wound_images_file_retrieve
+      description: Securely streams the raw wound image file binary after validating
+        ownership. Access is restricted to the patient themselves, their currently
+        assigned doctor, or an admin. Returns 404 (not 403) for unauthorized access
+        to prevent existence enumeration. Response is the raw image binary, not JSON.
+        Use this URL from `file_url` in the WoundImage metadata response.
+      summary: Stream Wound Image File
+      parameters:
+      - in: path
+        name: image_id
+        schema:
+          type: integer
+        description: WoundImage primary key
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: Raw image binary (image/jpeg or image/png)
+        '404':
+          description: Image not found or unauthorized
+  /api/wound/upload/:
+    post:
+      operationId: api_wound_upload_create
+      description: 'Uploads a wound image for the authenticated patient. Request must
+        use `multipart/form-data` with the file field named `image`. Patient identity
+        is derived server-side. Runs a prototype OpenCV image analysis heuristic automatically
+        after upload. MEDICAL SAFETY NOTICE: Image analysis results are prototype
+        decision-support indicators, not clinically validated diagnostic findings.'
+      summary: Upload Wound Image
+      tags:
+      - api
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/WoundImageRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WoundImage'
+          description: ''
+        '400':
+          description: Missing or invalid image file
+        '403':
+          description: Caller is not a patient
+  /health/:
+    get:
+      operationId: health_retrieve
+      description: Public health check endpoint. Returns current service status. No
+        authentication required.
+      summary: System Health Check
+      tags:
+      - health
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          description: '{"status": "running", "service": "medic backend", "version":
+            "1.0"}'
+components:
+  schemas:
+    AlertReadUpdate:
+      type: object
+      description: |-
+        Serializer strictly for updating the is_read status of an Alert.
+        All other fields are read-only.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        patient:
+          type: integer
+          readOnly: true
+        message:
+          type: string
+          readOnly: true
+        severity:
+          allOf:
+          - $ref: '#/components/schemas/SeverityEnum'
+          readOnly: true
+        is_read:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - id
+      - is_read
+      - message
+      - patient
+      - severity
+    AssignedDoctor:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+      required:
+      - id
+      - name
+    AuthMeResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        role:
+          type: string
+        patient_profile_id:
+          type: integer
+          nullable: true
+        doctor_profile_id:
+          type: integer
+          nullable: true
+        assigned_doctor:
+          allOf:
+          - $ref: '#/components/schemas/AssignedDoctor'
+          nullable: true
+      required:
+      - id
+      - role
+      - username
+    Conversation:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        doctor_id:
+          type: integer
+          readOnly: true
+        doctor_name:
+          type: string
+          readOnly: true
+        patient_id:
+          type: integer
+          readOnly: true
+        patient_name:
+          type: string
+          readOnly: true
+        patient_surgery_type:
+          type: string
+          readOnly: true
+        last_message:
+          type: object
+          additionalProperties: {}
+          readOnly: true
+        unread_count:
+          type: integer
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - doctor_id
+      - doctor_name
+      - id
+      - last_message
+      - patient_id
+      - patient_name
+      - patient_surgery_type
+      - unread_count
+      - updated_at
+    DailyHealthLog:
+      type: object
+      description: Serializer for DailyHealthLog with strict clinical input validation.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        patient:
+          type: integer
+          readOnly: true
+        temperature:
+          type: number
+          format: double
+          maximum: 42.0
+          minimum: 35.0
+          description: 'Body temperature in Celsius (valid physiological range: 35.0
+            - 42.0)'
+        pain_level:
+          type: integer
+          maximum: 10
+          minimum: 0
+          description: Self-reported pain level from 0 (no pain) to 10 (worst pain
+            imaginable)
+        swelling:
+          type: boolean
+          default: false
+        medication_taken:
+          type: boolean
+          default: false
+        notes:
+          type: string
+          maxLength: 1000
+        recovery_score:
+          type: integer
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - id
+      - pain_level
+      - patient
+      - recovery_score
+      - temperature
+    DailyHealthLogRequest:
+      type: object
+      description: Serializer for DailyHealthLog with strict clinical input validation.
+      properties:
+        temperature:
+          type: number
+          format: double
+          maximum: 42.0
+          minimum: 35.0
+          description: 'Body temperature in Celsius (valid physiological range: 35.0
+            - 42.0)'
+        pain_level:
+          type: integer
+          maximum: 10
+          minimum: 0
+          description: Self-reported pain level from 0 (no pain) to 10 (worst pain
+            imaginable)
+        swelling:
+          type: boolean
+          default: false
+        medication_taken:
+          type: boolean
+          default: false
+        notes:
+          type: string
+          maxLength: 1000
+      required:
+      - pain_level
+      - temperature
+    Medication:
+      type: object
+      description: |-
+        Serializer for Medication records with explicit fields.
+        Note: taken_status is kept for backward compatibility with legacy consumers.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        patient:
+          type: integer
+          readOnly: true
+        medicine_name:
+          type: string
+          maxLength: 200
+        dosage:
+          type: string
+          maxLength: 100
+        time:
+          type: string
+          format: time
+        taken_status:
+          type: boolean
+          description: Legacy summary flag. Use related MedicationDose records for
+            daily adherence.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - dosage
+      - id
+      - medicine_name
+      - patient
+      - time
+    MedicationDose:
+      type: object
+      description: |-
+        Serializer for individual scheduled medication doses.
+        Includes medication name and dosage for convenient frontend display.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        medication_id:
+          type: integer
+          readOnly: true
+        medicine_name:
+          type: string
+          readOnly: true
+        dosage:
+          type: string
+          readOnly: true
+        scheduled_for:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timezone-aware scheduled dose datetime
+        status:
+          $ref: '#/components/schemas/StatusEnum'
+        taken_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Exact timestamp when the patient recorded taking this dose
+        reminder_sent_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+          description: Timestamp when the ~30-min reminder was dispatched to the patient
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - dosage
+      - id
+      - medication_id
+      - medicine_name
+      - reminder_sent_at
+      - scheduled_for
+    MedicationRequest:
+      type: object
+      description: |-
+        Serializer for Medication records with explicit fields.
+        Note: taken_status is kept for backward compatibility with legacy consumers.
+      properties:
+        patient_id:
+          type: integer
+          writeOnly: true
+        medicine_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        dosage:
+          type: string
+          minLength: 1
+          maxLength: 100
+        time:
+          type: string
+          format: time
+        taken_status:
+          type: boolean
+          description: Legacy summary flag. Use related MedicationDose records for
+            daily adherence.
+      required:
+      - dosage
+      - medicine_name
+      - time
+    Message:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        conversation_id:
+          type: integer
+          readOnly: true
+        sender_id:
+          type: integer
+          readOnly: true
+        sender_name:
+          type: string
+          readOnly: true
+        sender_role:
+          type: string
+          readOnly: true
+        content:
+          type: string
+          maxLength: 4000
+        is_read:
+          type: boolean
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - content
+      - conversation_id
+      - created_at
+      - id
+      - is_read
+      - sender_id
+      - sender_name
+      - sender_role
+    MessageRequest:
+      type: object
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 4000
+      required:
+      - content
+    PaginatedDailyHealthLogList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/DailyHealthLog'
+    PaginatedMedicationList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Medication'
+    PaginatedPatientProfileList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/PatientProfile'
+    PaginatedWoundImageList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/WoundImage'
+    PatchedAlertReadUpdateRequest:
+      type: object
+      description: |-
+        Serializer strictly for updating the is_read status of an Alert.
+        All other fields are read-only.
+      properties:
+        is_read:
+          type: boolean
+    PatchedMedicationDoseRequest:
+      type: object
+      description: |-
+        Serializer for individual scheduled medication doses.
+        Includes medication name and dosage for convenient frontend display.
+      properties:
+        status:
+          $ref: '#/components/schemas/StatusEnum'
+        taken_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Exact timestamp when the patient recorded taking this dose
+    PatchedMedicationStatusUpdateRequest:
+      type: object
+      description: Legacy serializer for patient updating taken_status on the medication
+        level.
+      properties:
+        taken_status:
+          type: boolean
+    PatchedMessageRequest:
+      type: object
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 4000
+    PatientAlertSummary:
+      type: object
+      properties:
+        id:
+          type: integer
+        message:
+          type: string
+        severity:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+      required:
+      - created_at
+      - id
+      - message
+      - severity
+    PatientProfile:
+      type: object
+      description: Serializer for PatientProfile with explicit fields.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        user_id:
+          type: integer
+          readOnly: true
+        username:
+          type: string
+          readOnly: true
+        surgery_type:
+          type: string
+          maxLength: 200
+        surgery_date:
+          type: string
+          format: date
+        doctor_id:
+          type: integer
+          readOnly: true
+          nullable: true
+      required:
+      - doctor_id
+      - id
+      - surgery_date
+      - surgery_type
+      - user_id
+      - username
+    PatientProfileMeResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        role:
+          type: string
+        patient_profile_id:
+          type: integer
+        surgery_type:
+          type: string
+        surgery_date:
+          type: string
+        assigned_doctor:
+          allOf:
+          - $ref: '#/components/schemas/AssignedDoctor'
+          nullable: true
+      required:
+      - id
+      - patient_profile_id
+      - role
+      - surgery_date
+      - surgery_type
+      - username
+    RecoveryTrendItem:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+        score:
+          type: integer
+          description: Computed recovery score (0-100)
+      required:
+      - date
+      - score
+    RiskPredictionResponse:
+      type: object
+      properties:
+        patient_id:
+          type: integer
+          description: PatientProfile.id
+        risk_prediction:
+          type: string
+          description: 'Prototype heuristic risk assessment: low, medium, or high'
+        has_health_logs:
+          type: boolean
+        has_wound_images:
+          type: boolean
+      required:
+      - has_health_logs
+      - has_wound_images
+      - patient_id
+      - risk_prediction
+    SeverityEnum:
+      enum:
+      - low
+      - medium
+      - high
+      type: string
+      description: |-
+        * `low` - Low
+        * `medium` - Medium
+        * `high` - High
+    StatusEnum:
+      enum:
+      - pending
+      - taken
+      - missed
+      type: string
+      description: |-
+        * `pending` - Pending
+        * `taken` - Taken
+        * `missed` - Missed
+    TokenObtainPair:
+      type: object
+      properties:
+        access:
+          type: string
+          readOnly: true
+        refresh:
+          type: string
+          readOnly: true
+      required:
+      - access
+      - refresh
+    TokenObtainPairRequest:
+      type: object
+      properties:
+        username:
+          type: string
+          writeOnly: true
+          minLength: 1
+        password:
+          type: string
+          writeOnly: true
+          minLength: 1
+      required:
+      - password
+      - username
+    TokenRefresh:
+      type: object
+      properties:
+        access:
+          type: string
+          readOnly: true
+      required:
+      - access
+    TokenRefreshRequest:
+      type: object
+      properties:
+        refresh:
+          type: string
+          writeOnly: true
+          minLength: 1
+      required:
+      - refresh
+    WoundImage:
+      type: object
+      description: Serializer for WoundImage uploads with strict file verification
+        and secure streaming URL.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        patient:
+          type: integer
+          readOnly: true
+        image:
+          type: string
+          format: uri
+        analysis_result:
+          type: string
+          readOnly: true
+        uploaded_at:
+          type: string
+          format: date-time
+          readOnly: true
+        file_url:
+          type: string
+          format: uri
+          readOnly: true
+      required:
+      - analysis_result
+      - file_url
+      - id
+      - image
+      - patient
+      - uploaded_at
+    WoundImageRequest:
+      type: object
+      description: Serializer for WoundImage uploads with strict file verification
+        and secure streaming URL.
+      properties:
+        image:
+          type: string
+          format: binary
+      required:
+      - image
+  securitySchemes:
+    jwtAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

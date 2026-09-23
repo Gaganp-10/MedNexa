@@ -8,6 +8,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse, OpenApiTypes
 
 from accounts.access import get_accessible_patient
 from accounts.models import PatientProfile
@@ -52,6 +53,20 @@ def get_accessible_conversation(user, conversation_id):
     return conv
 
 
+@extend_schema(
+    summary="List Conversations",
+    description=(
+        "Lists all of the caller's own conversations (as doctor or patient), "
+        "paginated, ordered by most recently active first. "
+        "Doctors only see conversations with currently assigned patients. "
+        "Patients only see their conversation with their currently assigned doctor. "
+        "Returns an empty list if no conversations exist."
+    ),
+    responses={
+        200: ConversationSerializer(many=True),
+        401: OpenApiResponse(description="Unauthenticated"),
+    }
+)
 class ConversationListView(APIView):
     """
     GET /api/communication/conversations/
@@ -92,6 +107,21 @@ class ConversationListView(APIView):
         serializer = ConversationSerializer(page, many=True, context={"request": request})
         return paginator.get_paginated_response(serializer.data)
 
+    @extend_schema(
+        summary="Create Conversation or Send First Message",
+        description=(
+            "Creates or retrieves a conversation between the caller and their assigned counterpart. "
+            "If `content` is included in the body, also sends the first message and returns the Message object. "
+            "If only `patient_id` is provided (doctor caller), creates the conversation and returns the Conversation object. "
+            "Patients do not need to supply any ID — their assigned doctor is resolved server-side."
+        ),
+        request=OpenApiTypes.OBJECT,
+        responses={
+            201: MessageSerializer,
+            400: OpenApiResponse(description="Missing patient_id or empty content"),
+            404: OpenApiResponse(description="Assigned doctor/patient not found"),
+        }
+    )
     def post(self, request):
         user = request.user
         patient = None
@@ -138,6 +168,62 @@ class ConversationListView(APIView):
         )
 
 
+@extend_schema(
+    methods=["GET"],
+    summary="List Conversation Messages",
+    description=(
+        "Returns paginated message history for a specific conversation, "
+        "ordered **oldest-to-newest** (ascending created_at — standard chronological chat order). "
+        "A conversation with zero messages returns an empty results list (HTTP 200), not an error. "
+        "Verifies that the caller is a current participant and that the doctor is still assigned."
+    ),
+    parameters=[
+        OpenApiParameter(
+            name="pk",
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.PATH,
+            description="Conversation.id (primary key)"
+        )
+    ],
+    responses={
+        200: MessageSerializer(many=True),
+        404: OpenApiResponse(description="Conversation not found or caller is not an active participant"),
+    }
+)
+@extend_schema(
+    methods=["POST"],
+    summary="Send Message",
+    description=(
+        "Sends a message to the specified conversation. "
+        "**Sender is always `request.user` — any `sender` or `sender_id` field in the body is ignored.** "
+        "Validates that content is non-empty, non-whitespace, and ≤4000 characters. "
+        "\n\n**Auto-creation on first message**: if `<pk>` is a `PatientProfile.id` "
+        "(i.e., the conversation doesn't exist yet), the conversation is automatically created "
+        "before sending the message. This is the recommended way to start a conversation — "
+        "no separate 'create conversation' step is needed. "
+        "Once a conversation exists, subsequent POSTs should use the `Conversation.id` returned "
+        "in the conversations list.\n\n"
+        "After persisting the message, it is broadcast to the `chat_<conversation_id>` WebSocket group "
+        "and a lightweight notification is dispatched to the recipient's personal channel."
+    ),
+    parameters=[
+        OpenApiParameter(
+            name="pk",
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.PATH,
+            description=(
+                "**First message**: pass PatientProfile.id (doctor caller) — conversation is auto-created. "
+                "**Subsequent messages**: pass Conversation.id from the conversations list."
+            )
+        )
+    ],
+    request=MessageSerializer,
+    responses={
+        201: MessageSerializer,
+        400: OpenApiResponse(description="Empty or whitespace-only message content"),
+        404: OpenApiResponse(description="Conversation/patient not found or caller not an active participant"),
+    }
+)
 class ConversationMessagesView(APIView):
     """
     GET /api/communication/conversations/<id>/messages/
@@ -215,6 +301,29 @@ class ConversationMessagesView(APIView):
         return Response(MessageSerializer(message).data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema(
+    summary="Mark Message as Read",
+    description=(
+        "Marks a specific message as read (`is_read = true`). "
+        "**Only the recipient (not the sender) may mark a message read.** "
+        "If the sender attempts to mark their own message read, 403 Forbidden is returned. "
+        "If the caller is not a participant, 404 is returned to prevent existence enumeration. "
+        "If the doctor is no longer assigned to the patient, 404 is returned."
+    ),
+    parameters=[
+        OpenApiParameter(
+            name="pk",
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.PATH,
+            description="Message primary key"
+        )
+    ],
+    responses={
+        200: MessageSerializer,
+        403: OpenApiResponse(description="Sender cannot mark their own message as read"),
+        404: OpenApiResponse(description="Message not found or caller is not an active participant"),
+    }
+)
 class MessageReadReceiptView(APIView):
     """
     PATCH /api/communication/messages/<id>/read/
@@ -222,6 +331,7 @@ class MessageReadReceiptView(APIView):
     Only the recipient (not the sender) can mark it read.
     """
     permission_classes = [IsAuthenticated]
+    serializer_class = MessageSerializer  # hint for drf-spectacular
 
     def patch(self, request, pk):
         try:

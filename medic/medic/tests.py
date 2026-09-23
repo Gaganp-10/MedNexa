@@ -70,3 +70,27 @@ class ApiDocSmokeTests(TestCase):
         self.client.force_authenticate(user=user)
         response = self.client.get("/api/schema/")
         self.assertEqual(response.status_code, 200)
+
+
+class HealthEndpointSmokeTest(TestCase):
+    """
+    Phase 7 gap: test the public system health check endpoint.
+    """
+
+    def setUp(self):
+        self.plain_client = Client()
+
+    def test_health_endpoint_returns_200(self):
+        """GET /health/ must return 200 OK without authentication."""
+        response = self.plain_client.get("/health/")
+        self.assertEqual(response.status_code, 200)
+
+    def test_health_endpoint_returns_running_status(self):
+        """GET /health/ response must contain status=running and service name."""
+        response = self.plain_client.get("/health/")
+        self.assertEqual(response.status_code, 200)
+        import json
+        data = json.loads(response.content)
+        self.assertEqual(data["status"], "running")
+        self.assertIn("medic", data["service"].lower())
+        self.assertIn("version", data)

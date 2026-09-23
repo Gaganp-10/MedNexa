@@ -385,3 +385,77 @@ class MedicationDoseAndReminderTests(TestCase):
         self.assertIsNotNone(near_dose.reminder_sent_at)
         self.assertIsNone(far_dose.reminder_sent_at)
 
+
+class ReminderWindowBoundaryTests(TestCase):
+    """
+    Phase 7 gap: test the exact 30-minute reminder window boundary.
+    - Dose at exactly 30 minutes: MUST be picked up (within window, inclusive).
+    - Dose at exactly 30 minutes + 1 second: MUST NOT be picked up (outside window).
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+
+        self.doc = User.objects.create_user(
+            username="rw_doc", password="pass", role="doctor"
+        )
+        self.p_user = User.objects.create_user(
+            username="rw_p1", password="pass", role="patient"
+        )
+        self.p_profile = PatientProfile.objects.create(
+            user=self.p_user,
+            surgery_type="Test",
+            surgery_date=datetime.date(2026, 3, 1),
+            doctor=self.doc
+        )
+        self.med = Medication.objects.create(
+            patient=self.p_profile,
+            medicine_name="BoundaryMed",
+            dosage="100mg",
+            time=datetime.time(8, 0)
+        )
+
+    def test_dose_at_exactly_30_minutes_included_in_reminder(self):
+        """
+        A dose scheduled exactly 30 minutes from now must be picked up by the reminder.
+        The window is (now, now + 30m] inclusive.
+        """
+        from django.utils import timezone
+        from medication.models import MedicationDose
+        from medication.reminders import check_and_send_reminders
+
+        now = timezone.now()
+        dose_at_30m = MedicationDose.objects.create(
+            medication=self.med,
+            scheduled_for=now + datetime.timedelta(minutes=30),
+            status="pending"
+        )
+
+        sent = check_and_send_reminders(reference_time=now, window_minutes=30)
+        self.assertGreaterEqual(sent, 1, "Dose at exactly 30m should be included in window")
+
+        dose_at_30m.refresh_from_db()
+        self.assertIsNotNone(dose_at_30m.reminder_sent_at,
+                             "Dose at exactly 30m should have reminder_sent_at set")
+
+    def test_dose_at_30_minutes_plus_1_second_not_included(self):
+        """
+        A dose scheduled at 30 minutes + 1 second must NOT be picked up by the reminder.
+        """
+        from django.utils import timezone
+        from medication.models import MedicationDose
+        from medication.reminders import check_and_send_reminders
+
+        now = timezone.now()
+        dose_just_outside = MedicationDose.objects.create(
+            medication=self.med,
+            scheduled_for=now + datetime.timedelta(minutes=30, seconds=1),
+            status="pending"
+        )
+
+        sent = check_and_send_reminders(reference_time=now, window_minutes=30)
+        self.assertEqual(sent, 0, "Dose at 30m+1s should NOT be included in window")
+
+        dose_just_outside.refresh_from_db()
+        self.assertIsNone(dose_just_outside.reminder_sent_at,
+                          "Dose at 30m+1s should NOT have reminder_sent_at set")

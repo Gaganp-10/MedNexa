@@ -267,3 +267,213 @@ class AlertWebSocketSecurityTests(TransactionTestCase):
         self.assertEqual(msg["body"], "Take Amoxicillin 500mg")
 
         await communicator.disconnect()
+
+
+class AlertThresholdBoundaryTests(TransactionTestCase):
+    """
+    Phase 7 gap: test each alert threshold on both sides of the boundary.
+
+    Thresholds (from alerts/services.py):
+      Temperature:
+        > 39.0  → high alert ("urgent")
+        > 38.0  → high alert ("elevated") [if not already > 39.0]
+        ≤ 38.0  → no temperature alert
+      Pain:
+        > 9     → high alert
+        > 8     → medium alert [if not already > 9]
+        ≤ 8     → no pain alert
+      Medication:
+        not taken → low alert
+        taken     → no medication alert
+    """
+
+    def setUp(self):
+        self.p_user = User.objects.create_user(
+            username="thresh_p", password="pass", role="patient"
+        )
+        self.p_profile = PatientProfile.objects.create(
+            user=self.p_user,
+            surgery_type="Appendectomy",
+            surgery_date=datetime.date(2026, 3, 1),
+            doctor=None  # no doctor: no WS dispatch, just DB alert creation
+        )
+
+    def _make_log(self, temp, pain, med_taken=True):
+        return DailyHealthLog.objects.create(
+            patient=self.p_profile,
+            temperature=temp,
+            pain_level=pain,
+            medication_taken=med_taken
+        )
+
+    # ── Temperature boundary ───────────────────────────────────────────────────
+
+    def test_temp_exactly_38_no_alert(self):
+        """Temperature exactly 38.0 must NOT generate a temperature alert."""
+        Alert.objects.all().delete()
+        log = self._make_log(38.0, 5)
+        alerts = analyze_health_log(log)
+        temp_alerts = [a for a in alerts if "temperature" in a.message.lower()]
+        self.assertEqual(len(temp_alerts), 0,
+                         "Temperature 38.0 is not > 38.0, so no alert expected")
+
+    def test_temp_just_above_38_generates_elevated_alert(self):
+        """Temperature 38.01 (just above 38.0) must generate an elevated temperature alert."""
+        Alert.objects.all().delete()
+        log = self._make_log(38.01, 5)
+        alerts = analyze_health_log(log)
+        temp_alerts = [a for a in alerts if "temperature" in a.message.lower()]
+        self.assertGreater(len(temp_alerts), 0,
+                           "Temperature 38.01 is > 38.0, should trigger elevated alert")
+
+    def test_temp_exactly_39_no_urgent_alert(self):
+        """
+        Temperature exactly 39.0 is NOT > 39.0 so must NOT generate the urgent ('high fever') alert.
+        It IS > 38.0 so it generates the 'elevated' alert instead.
+        """
+        Alert.objects.all().delete()
+        log = self._make_log(39.0, 5)
+        alerts = analyze_health_log(log)
+        # Should have at most one temperature alert and it should be the 'elevated' one
+        temp_alerts = [a for a in alerts if "temperature" in a.message.lower()]
+        self.assertEqual(len(temp_alerts), 1)
+        self.assertNotIn("urgent", temp_alerts[0].message.lower())
+
+    def test_temp_just_above_39_generates_urgent_alert(self):
+        """Temperature 39.01 (just above 39.0) must generate the urgent temperature alert."""
+        Alert.objects.all().delete()
+        log = self._make_log(39.01, 5)
+        alerts = analyze_health_log(log)
+        temp_alerts = [a for a in alerts if "temperature" in a.message.lower()]
+        self.assertGreater(len(temp_alerts), 0)
+        # At least one should be 'urgent'
+        urgent = [a for a in temp_alerts if "urgent" in a.message.lower()]
+        self.assertGreater(len(urgent), 0,
+                           "Temperature 39.01 should trigger urgent alert")
+
+    # ── Pain boundary ──────────────────────────────────────────────────────────
+
+    def test_pain_exactly_8_no_pain_alert(self):
+        """Pain level exactly 8 must NOT generate any pain alert."""
+        Alert.objects.all().delete()
+        log = self._make_log(37.0, 8)
+        alerts = analyze_health_log(log)
+        pain_alerts = [a for a in alerts if "pain" in a.message.lower()]
+        self.assertEqual(len(pain_alerts), 0,
+                         "Pain 8 is not > 8, so no pain alert expected")
+
+    def test_pain_exactly_9_generates_medium_alert(self):
+        """Pain level exactly 9 is > 8 but not > 9: must generate a medium pain alert."""
+        Alert.objects.all().delete()
+        log = self._make_log(37.0, 9)
+        alerts = analyze_health_log(log)
+        pain_alerts = [a for a in alerts if "pain" in a.message.lower()]
+        self.assertGreater(len(pain_alerts), 0, "Pain 9 > 8, should trigger alert")
+        # Should be medium, not urgent
+        self.assertFalse(
+            any("urgent" in a.message.lower() for a in pain_alerts),
+            "Pain 9 is not > 9, should not be urgent"
+        )
+
+    def test_pain_exactly_10_generates_high_urgent_alert(self):
+        """Pain level 10 is > 9: must generate the urgent (high severity) pain alert."""
+        Alert.objects.all().delete()
+        log = self._make_log(37.0, 10)
+        alerts = analyze_health_log(log)
+        pain_alerts = [a for a in alerts if "pain" in a.message.lower()]
+        self.assertGreater(len(pain_alerts), 0, "Pain 10 > 9, should trigger alert")
+        urgent = [a for a in pain_alerts if "urgent" in a.message.lower()]
+        self.assertGreater(len(urgent), 0, "Pain 10 should produce urgent alert")
+
+    # ── Medication taken boundary ──────────────────────────────────────────────
+
+    def test_medication_taken_true_no_adherence_alert(self):
+        """medication_taken=True must not generate a medication adherence alert."""
+        Alert.objects.all().delete()
+        log = self._make_log(37.0, 3, med_taken=True)
+        alerts = analyze_health_log(log)
+        med_alerts = [a for a in alerts if "medication" in a.message.lower() or "adherence" in a.message.lower()]
+        self.assertEqual(len(med_alerts), 0,
+                         "medication_taken=True should not generate adherence alert")
+
+    def test_medication_not_taken_generates_low_alert(self):
+        """medication_taken=False must generate a low-severity medication adherence alert."""
+        Alert.objects.all().delete()
+        log = self._make_log(37.0, 3, med_taken=False)
+        alerts = analyze_health_log(log)
+        med_alerts = [a for a in alerts if "medication" in a.message.lower() or "adherence" in a.message.lower()]
+        self.assertGreater(len(med_alerts), 0,
+                           "medication_taken=False should generate adherence alert")
+        self.assertEqual(med_alerts[0].severity, "low")
+
+
+class WebSocketExpiredTokenTests(TransactionTestCase):
+    """
+    Phase 7 gap: verify expired tokens are rejected on all three WS consumers.
+    """
+
+    def setUp(self):
+        self.doc = User.objects.create_user(
+            username="exp_doc", password="pass", role="doctor"
+        )
+        DoctorProfile.objects.create(user=self.doc, specialization="Surgery")
+        self.patient = User.objects.create_user(
+            username="exp_patient", password="pass", role="patient"
+        )
+        self.p_profile = PatientProfile.objects.create(
+            user=self.patient,
+            surgery_type="Appendectomy",
+            surgery_date=datetime.date(2026, 3, 1),
+            doctor=self.doc
+        )
+        self.conv = None  # created lazily
+
+    def _get_expired_token(self, user):
+        """Generate an already-expired access token by manipulating lifetime."""
+        import datetime as dt
+        from rest_framework_simplejwt.tokens import AccessToken as AT
+        from rest_framework_simplejwt.settings import api_settings
+        token = AT.for_user(user)
+        # Backdate the expiry to make it expired
+        token.set_exp(
+            claim="exp",
+            from_time=dt.datetime.now(tz=dt.timezone.utc) - dt.timedelta(hours=2),
+            lifetime=dt.timedelta(seconds=1)
+        )
+        return str(token)
+
+    async def test_expired_token_rejected_alerts_4401(self):
+        """Expired token on /ws/alerts/ must close with code 4401."""
+        token = self._get_expired_token(self.doc)
+        comm = WebsocketCommunicator(application, f"/ws/alerts/?token={token}")
+        connected, close_code = await comm.connect()
+        self.assertFalse(connected)
+        self.assertEqual(close_code, 4401)
+
+    async def test_expired_token_rejected_notifications_4401(self):
+        """Expired token on /ws/notifications/ must close with code 4401."""
+        token = self._get_expired_token(self.patient)
+        comm = WebsocketCommunicator(application, f"/ws/notifications/?token={token}")
+        connected, close_code = await comm.connect()
+        self.assertFalse(connected)
+        self.assertEqual(close_code, 4401)
+
+    async def test_expired_token_rejected_chat_4401(self):
+        """Expired token on /ws/chat/<conv_id>/ must close with code 4401."""
+        # Create conversation synchronously
+        from communication.models import Conversation
+        conv = await sync_to_async(Conversation.objects.create)(
+            doctor=self.doc, patient=self.p_profile
+        )
+        token = self._get_expired_token(self.doc)
+        comm = WebsocketCommunicator(application, f"/ws/chat/{conv.id}/?token={token}")
+        connected, close_code = await comm.connect()
+        self.assertFalse(connected)
+        self.assertEqual(close_code, 4401)
+
+    async def test_missing_token_notifications_rejected_4401(self):
+        """Connecting to /ws/notifications/ without a token must close with 4401."""
+        comm = WebsocketCommunicator(application, "/ws/notifications/")
+        connected, close_code = await comm.connect()
+        self.assertFalse(connected)
+        self.assertEqual(close_code, 4401)

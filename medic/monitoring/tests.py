@@ -98,6 +98,117 @@ class MonitoringSecurityAndValidationTests(TestCase):
         })
         self.assertEqual(res_pain.status_code, status.HTTP_400_BAD_REQUEST)
 
+    # ── Phase 7 gap: exact boundary values ────────────────────────────────────
+
+    def test_health_log_exact_boundary_temperature_min(self):
+        """Temperature exactly 35.0 (min valid) must be accepted."""
+        self.client.force_authenticate(user=self.p1_user)
+        res = self.client.post("/api/health/create/", {
+            "temperature": 35.0,
+            "pain_level": 5,
+        })
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED,
+                         "Temperature 35.0 is the minimum valid value — must be accepted")
+
+    def test_health_log_exact_boundary_temperature_max(self):
+        """Temperature exactly 42.0 (max valid) must be accepted."""
+        self.client.force_authenticate(user=self.p1_user)
+        res = self.client.post("/api/health/create/", {
+            "temperature": 42.0,
+            "pain_level": 5,
+        })
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED,
+                         "Temperature 42.0 is the maximum valid value — must be accepted")
+
+    def test_health_log_just_below_min_temperature_rejected(self):
+        """Temperature 34.99 (just below minimum) must be rejected with 400."""
+        self.client.force_authenticate(user=self.p1_user)
+        res = self.client.post("/api/health/create/", {
+            "temperature": 34.99,
+            "pain_level": 5,
+        })
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_health_log_just_above_max_temperature_rejected(self):
+        """Temperature 42.01 (just above maximum) must be rejected with 400."""
+        self.client.force_authenticate(user=self.p1_user)
+        res = self.client.post("/api/health/create/", {
+            "temperature": 42.01,
+            "pain_level": 5,
+        })
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_health_log_exact_boundary_pain_min(self):
+        """Pain level exactly 0 (min valid) must be accepted."""
+        self.client.force_authenticate(user=self.p1_user)
+        res = self.client.post("/api/health/create/", {
+            "temperature": 37.0,
+            "pain_level": 0,
+        })
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED,
+                         "Pain level 0 is the minimum valid value — must be accepted")
+
+    def test_health_log_exact_boundary_pain_max(self):
+        """Pain level exactly 10 (max valid) must be accepted."""
+        self.client.force_authenticate(user=self.p1_user)
+        res = self.client.post("/api/health/create/", {
+            "temperature": 37.0,
+            "pain_level": 10,
+        })
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED,
+                         "Pain level 10 is the maximum valid value — must be accepted")
+
+    def test_health_log_pain_negative_one_rejected(self):
+        """Pain level -1 (just below minimum) must be rejected."""
+        self.client.force_authenticate(user=self.p1_user)
+        res = self.client.post("/api/health/create/", {
+            "temperature": 37.0,
+            "pain_level": -1,
+        })
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_health_log_pain_eleven_rejected(self):
+        """Pain level 11 (just above maximum) must be rejected."""
+        self.client.force_authenticate(user=self.p1_user)
+        res = self.client.post("/api/health/create/", {
+            "temperature": 37.0,
+            "pain_level": 11,
+        })
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # ── Phase 7 gap: exact file size boundary ──────────────────────────────────
+
+    def test_wound_upload_exactly_5mb_accepted(self):
+        """
+        A wound image of exactly 5 MB (5 * 1024 * 1024 bytes) must be accepted.
+        We build a valid JPEG that is padded with trailing bytes to hit exactly 5MB.
+        """
+        self.client.force_authenticate(user=self.p1_user)
+
+        img = PILImage.new("RGB", (100, 100), color="green")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        raw_jpeg = buf.getvalue()
+
+        target_size = 5 * 1024 * 1024
+        final_jpeg = raw_jpeg + b"0" * (target_size - len(raw_jpeg))
+
+        exact_file = SimpleUploadedFile("exact_5mb.jpg", final_jpeg, content_type="image/jpeg")
+        res = self.client.post("/api/wound/upload/", {"image": exact_file}, format="multipart")
+
+        self.assertEqual(len(final_jpeg), target_size)
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED,
+                         f"File of size {len(final_jpeg)} bytes (exact 5MB) should be accepted")
+
+    def test_wound_upload_one_byte_over_5mb_rejected(self):
+        """An image of 5 MB + 1 byte must be rejected with 400."""
+        self.client.force_authenticate(user=self.p1_user)
+        over_limit = b"0" * (5 * 1024 * 1024 + 1)
+        over_file = SimpleUploadedFile("over.jpg", over_limit, content_type="image/jpeg")
+        res = self.client.post("/api/wound/upload/", {"image": over_file}, format="multipart")
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST,
+                         "File of 5MB+1 byte must be rejected")
+
     def test_doctor_cannot_create_health_log(self):
         """Doctors cannot submit patient health logs."""
         self.client.force_authenticate(user=self.doc1)
@@ -191,6 +302,52 @@ class MonitoringSecurityAndValidationTests(TestCase):
         self.assertEqual(res_risk.status_code, status.HTTP_200_OK)
         self.assertIn("Insufficient data", res_risk.data["risk_prediction"])
 
+    # ── Phase 7 gap: recovery score and risk with 1 log and many logs ─────────
+
+    def test_recovery_score_and_risk_with_one_log(self):
+        """One health log: recovery trend returns one entry; risk returns a value (not 'Insufficient data')."""
+        DailyHealthLog.objects.create(
+            patient=self.p1_profile,
+            temperature=37.0,
+            pain_level=2,
+            swelling=False,
+            medication_taken=True
+        )
+        self.client.force_authenticate(user=self.p1_user)
+
+        res_trend = self.client.get(f"/api/patient/{self.p1_profile.id}/recovery-trend/")
+        self.assertEqual(res_trend.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res_trend.data), 1)
+        self.assertIn("score", res_trend.data[0])
+
+        res_risk = self.client.get(f"/api/patient/{self.p1_profile.id}/risk/")
+        self.assertEqual(res_risk.status_code, status.HTTP_200_OK)
+        # With 1 log there is still insufficient data (model needs more)
+        self.assertIn("risk_prediction", res_risk.data)
+
+    def test_recovery_score_and_risk_with_many_logs(self):
+        """Many health logs: recovery trend returns multiple entries with scores."""
+        for day_offset in range(5):
+            DailyHealthLog.objects.create(
+                patient=self.p1_profile,
+                temperature=36.5 + day_offset * 0.1,
+                pain_level=5 - day_offset,
+                swelling=False,
+                medication_taken=True
+            )
+        self.client.force_authenticate(user=self.p1_user)
+
+        res_trend = self.client.get(f"/api/patient/{self.p1_profile.id}/recovery-trend/")
+        self.assertEqual(res_trend.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res_trend.data), 5)
+        for entry in res_trend.data:
+            self.assertIn("score", entry)
+            self.assertIsNotNone(entry["score"])
+
+        res_risk = self.client.get(f"/api/patient/{self.p1_profile.id}/risk/")
+        self.assertEqual(res_risk.status_code, status.HTTP_200_OK)
+        self.assertIn("risk_prediction", res_risk.data)
+
     def _create_sample_webp_file(self, filename="wound.webp", size=(50, 50)):
         img = PILImage.new("RGB", size, color="blue")
         buf = io.BytesIO()
@@ -226,4 +383,3 @@ class MonitoringSecurityAndValidationTests(TestCase):
 
         response = self.client.post("/api/wound/upload/", {"image": fake_file}, format="multipart")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-

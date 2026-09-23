@@ -1,26 +1,31 @@
 """
 URL configuration for medic project.
-
-The `urlpatterns` list routes URLs to views. For more information please see:
-    https://docs.djangoproject.com/en/6.0/topics/http/urls/
-Examples:
-Function views
-    1. Add an import:  from my_app import views
-    2. Add a URL to urlpatterns:  path('', views.home, name='home')
-Class-based views
-    1. Add an import:  from other_app.views import Home
-    2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
-Including another URLconf
-    1. Import the include() function: from django.urls import include, path
-    2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
-from django.urls import path , include
-from django.conf import settings
-from django.conf.urls.static import static
-from rest_framework_simplejwt.views import (TokenObtainPairView, TokenRefreshView,)
+from django.urls import path, include
+from rest_framework.throttling import AnonRateThrottle
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from .health import SystemHealthView
+
+
+class LoginRateThrottle(AnonRateThrottle):
+    """
+    Phase 8: Scoped throttle for the /api/token/ login endpoint.
+    Limits anonymous login attempts to 5 per minute to slow brute-force.
+    Rate configured by DEFAULT_THROTTLE_RATES['login'] in settings.
+    """
+    scope = "login"
+
+
+class ThrottledTokenObtainPairView(TokenObtainPairView):
+    """TokenObtainPairView with login-specific throttle applied."""
+    throttle_classes = [LoginRateThrottle]
+
+
+class ThrottledTokenRefreshView(TokenRefreshView):
+    """TokenRefreshView with login-specific throttle applied."""
+    throttle_classes = [LoginRateThrottle]
 
 
 urlpatterns = [
@@ -30,19 +35,15 @@ urlpatterns = [
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
 
     path('api/', include('monitoring.urls')),
-
     path('api/', include('accounts.urls')),
-
     path('api/', include('medication.urls')),
-
     path('api/', include('alerts.urls')),
-
     path('api/', include('communication.urls')),
 
-    path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
+    # Phase 8: throttled JWT endpoints (5 attempts/min to slow brute-force)
+    path('api/token/', ThrottledTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('api/token/refresh/', ThrottledTokenRefreshView.as_view(), name='token_refresh'),
 
-    path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
-    
     path("health/", SystemHealthView.as_view()),
 ]
 

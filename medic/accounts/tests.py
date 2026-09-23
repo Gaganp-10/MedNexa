@@ -1,5 +1,6 @@
 import datetime
 from django.test import TestCase
+from django.core.cache import cache
 from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
@@ -191,3 +192,241 @@ class AccountsSecurityAndAccessTests(TestCase):
                 call_command("seed_demo")
             self.assertIn("DEBUG is True", str(cm.exception))
 
+
+class LoginAndCredentialTests(TestCase):
+    """
+    Phase 7 gap: tests for /api/token/ (login) endpoint —
+    both roles succeeding and invalid credentials being rejected.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.doc = User.objects.create_user(
+            username="login_doc", password="correctpass", role="doctor"
+        )
+        self.patient = User.objects.create_user(
+            username="login_patient", password="correctpass", role="patient"
+        )
+        PatientProfile.objects.create(
+            user=self.patient,
+            surgery_type="Appendectomy",
+            surgery_date=datetime.date(2026, 3, 1),
+        )
+
+    def tearDown(self):
+        cache.clear()
+
+    def test_doctor_login_returns_token_pair(self):
+        """Successful doctor login returns access and refresh JWT tokens."""
+        res = self.client.post(
+            "/api/token/",
+            {"username": "login_doc", "password": "correctpass"},
+            format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn("access", res.data)
+        self.assertIn("refresh", res.data)
+        self.assertTrue(len(res.data["access"]) > 20)
+        self.assertTrue(len(res.data["refresh"]) > 20)
+
+    def test_patient_login_returns_token_pair(self):
+        """Successful patient login returns access and refresh JWT tokens."""
+        res = self.client.post(
+            "/api/token/",
+            {"username": "login_patient", "password": "correctpass"},
+            format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn("access", res.data)
+        self.assertIn("refresh", res.data)
+
+    def test_wrong_password_returns_401(self):
+        """Incorrect password must be rejected with 401 Unauthorized."""
+        res = self.client.post(
+            "/api/token/",
+            {"username": "login_doc", "password": "WRONG_PASSWORD"},
+            format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertNotIn("access", res.data)
+
+    def test_nonexistent_user_returns_401(self):
+        """Login with a username that does not exist must return 401."""
+        res = self.client.post(
+            "/api/token/",
+            {"username": "ghost_user_99999", "password": "any"},
+            format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_missing_password_field_returns_400(self):
+        """Login request with missing password field returns 400 Bad Request."""
+        res = self.client.post(
+            "/api/token/",
+            {"username": "login_doc"},
+            format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_missing_username_field_returns_400(self):
+        """Login request with missing username field returns 400 Bad Request."""
+        res = self.client.post(
+            "/api/token/",
+            {"password": "correctpass"},
+            format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_token_can_be_used_to_access_protected_endpoint(self):
+        """A valid access token returned by /api/token/ actually grants API access."""
+        login_res = self.client.post(
+            "/api/token/",
+            {"username": "login_doc", "password": "correctpass"},
+            format="json"
+        )
+        access_token = login_res.data["access"]
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access_token}")
+        me_res = self.client.get("/api/auth/me/")
+        self.assertEqual(me_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(me_res.data["username"], "login_doc")
+
+    def test_refresh_token_produces_new_access_token(self):
+        """A valid refresh token can obtain a new access token."""
+        login_res = self.client.post(
+            "/api/token/",
+            {"username": "login_doc", "password": "correctpass"},
+            format="json"
+        )
+        refresh_token = login_res.data["refresh"]
+        refresh_res = self.client.post(
+            "/api/token/refresh/",
+            {"refresh": refresh_token},
+            format="json"
+        )
+        self.assertEqual(refresh_res.status_code, status.HTTP_200_OK)
+        self.assertIn("access", refresh_res.data)
+
+    def test_login_rate_limiting_enforces_429(self):
+        """Phase 8: After 5 attempts within a minute, 6th attempt is throttled with 429."""
+        cache.clear()
+        for _ in range(5):
+            self.client.post(
+                "/api/token/",
+                {"username": "login_doc", "password": "wrong_password"},
+                format="json"
+            )
+        res = self.client.post(
+            "/api/token/",
+            {"username": "login_doc", "password": "wrong_password"},
+            format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+
+
+class UnassignedDoctorAllEndpointsTests(TestCase):
+    """
+    Phase 7 gap: systematic check that an unassigned doctor gets 404
+    on every patient-scoped endpoint, not just logs/risk.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+
+        self.doc1 = User.objects.create_user(
+            username="unassigned_doc1", password="pass", role="doctor"
+        )
+        self.doc2 = User.objects.create_user(
+            username="unassigned_doc2", password="pass", role="doctor"
+        )
+        self.p1_user = User.objects.create_user(
+            username="unassigned_p1", password="pass", role="patient"
+        )
+        self.p1_profile = PatientProfile.objects.create(
+            user=self.p1_user,
+            surgery_type="Appendectomy",
+            surgery_date=datetime.date(2026, 3, 1),
+            doctor=self.doc1
+        )
+
+    def test_unassigned_doctor_all_patient_endpoints_return_404(self):
+        """
+        Doctor 2 (not assigned to patient 1) must receive 404 on all
+        patient-scoped endpoints that use get_accessible_patient.
+        """
+        self.client.force_authenticate(user=self.doc2)
+        pid = self.p1_profile.id
+        endpoints = [
+            f"/api/patient/{pid}/logs/",
+            f"/api/patient/{pid}/wounds/",
+            f"/api/patient/{pid}/alerts/",
+            f"/api/patient/{pid}/recovery-trend/",
+            f"/api/patient/{pid}/risk/",
+            f"/api/patient/{pid}/medication-adherence/",
+            f"/api/medication/{pid}/",
+        ]
+        for url in endpoints:
+            res = self.client.get(url)
+            self.assertEqual(
+                res.status_code,
+                status.HTTP_404_NOT_FOUND,
+                f"Expected 404 for unassigned doctor at {url}, got {res.status_code}"
+            )
+
+
+class CrossPatientIsolationAllEndpointsTests(TestCase):
+    """
+    Phase 7 gap: patient cannot access another patient's data on any endpoint.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+
+        self.doc1 = User.objects.create_user(
+            username="cross_doc1", password="pass", role="doctor"
+        )
+        self.doc2 = User.objects.create_user(
+            username="cross_doc2", password="pass", role="doctor"
+        )
+        self.p1_user = User.objects.create_user(
+            username="cross_p1", password="pass", role="patient"
+        )
+        self.p1_profile = PatientProfile.objects.create(
+            user=self.p1_user,
+            surgery_type="Appendectomy",
+            surgery_date=datetime.date(2026, 3, 1),
+            doctor=self.doc1
+        )
+        self.p2_user = User.objects.create_user(
+            username="cross_p2", password="pass", role="patient"
+        )
+        self.p2_profile = PatientProfile.objects.create(
+            user=self.p2_user,
+            surgery_type="Knee Surgery",
+            surgery_date=datetime.date(2026, 3, 5),
+            doctor=self.doc2
+        )
+
+    def test_patient_cannot_access_other_patient_all_endpoints(self):
+        """
+        Patient 2 must receive 404 on every endpoint scoped to Patient 1.
+        """
+        self.client.force_authenticate(user=self.p2_user)
+        pid = self.p1_profile.id
+        endpoints = [
+            f"/api/patient/{pid}/logs/",
+            f"/api/patient/{pid}/wounds/",
+            f"/api/patient/{pid}/alerts/",
+            f"/api/patient/{pid}/recovery-trend/",
+            f"/api/patient/{pid}/risk/",
+            f"/api/patient/{pid}/medication-adherence/",
+            f"/api/medication/{pid}/",
+        ]
+        for url in endpoints:
+            res = self.client.get(url)
+            self.assertEqual(
+                res.status_code,
+                status.HTTP_404_NOT_FOUND,
+                f"Expected 404 for cross-patient access to {url}, got {res.status_code}"
+            )

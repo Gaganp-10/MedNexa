@@ -13,4 +13,4 @@ export const WS_BASE_URL = (
 ).replace(/\/+$/, '')
 
 export const CLINICAL_SAFETY_DISCLAIMER =
-  'MEDIC is a decision-support prototype, not a diagnostic tool. All indicators require clinical review.'
+  'MedNexa is a decision-support prototype, not a diagnostic tool. All indicators require clinical review.'

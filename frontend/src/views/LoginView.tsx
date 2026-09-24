@@ -53,7 +53,7 @@ export const LoginView: React.FC = () => {
               <HeartPulse className="h-8 w-8" />
             </div>
             <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-white">
-              MEDIC Clinical Portal
+              MedNexa Clinical Portal
             </h1>
             <p className="text-xs text-slate-400 mt-1 max-w-xs">
               Post-Surgery Remote Patient Monitoring & Clinical Decision Support
@@ -142,7 +142,7 @@ export const LoginView: React.FC = () => {
 
       {/* Footer info */}
       <footer className="w-full max-w-4xl text-center py-2 text-[11px] text-slate-500 font-mono">
-        MEDIC Decision-Support Client • REST & WebSocket Protocol
+        MedNexa Decision-Support Client • REST & WebSocket Protocol
       </footer>
     </div>
   )

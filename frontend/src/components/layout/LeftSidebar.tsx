@@ -86,7 +86,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
           </div>
           <div>
             <div className="flex items-center gap-1.5">
-              <span className="text-base font-bold tracking-tight text-white">MEDIC</span>
+              <span className="text-base font-bold tracking-tight text-white">MedNexa</span>
               <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-teal-500/20 text-teal-300">
                 PRO
               </span>

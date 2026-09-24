@@ -5,7 +5,7 @@ import type { RefreshTokenResponse } from '@/types/api'
 let inMemoryAccessToken: string | null = null
 
 // Refresh token key in localStorage
-const REFRESH_TOKEN_KEY = 'medic_refresh_token'
+const REFRESH_TOKEN_KEY = 'mednexa_refresh_token'
 
 // Event listener for auth state changes
 type AuthChangeListener = (authenticated: boolean) => void

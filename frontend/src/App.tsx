@@ -129,7 +129,7 @@ const RootApp: React.FC = () => {
     return (
       <div className="min-h-screen bg-[#080d1a] flex flex-col items-center justify-center gap-3 text-slate-400">
         <Loader2 className="h-8 w-8 animate-spin text-teal-400" />
-        <p className="text-xs font-medium tracking-wide">Initializing MEDIC Portal...</p>
+        <p className="text-xs font-medium tracking-wide">Initializing MedNexa Portal...</p>
       </div>
     )
   }

@@ -10,6 +10,7 @@ import { AlertsListView } from '@/components/common/AlertsListView'
 import { ChatPanel } from '@/components/chat/ChatPanel'
 import { PrescribeMedicationModal } from '@/components/doctor/PrescribeMedicationModal'
 import { ClinicalDisclaimer } from '@/components/common/ClinicalDisclaimer'
+import { unwrapList } from '@/lib/utils'
 import {
   Users,
   Search,

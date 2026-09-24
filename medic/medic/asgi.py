@@ -8,16 +8,17 @@ https://docs.djangoproject.com/en/6.0/howto/deployment/asgi/
 """
 
 import os
-from channels.routing import ProtocolTypeRouter, URLRouter
 from django.core.asgi import get_asgi_application
-from django.urls import path
-from alerts.consumers import AlertConsumer, PatientNotificationConsumer
-from communication.consumers import ChatConsumer
-from alerts.ws_auth import JWTAuthMiddleware
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'medic.settings')
 
 django_asgi_app = get_asgi_application()
+
+from channels.routing import ProtocolTypeRouter, URLRouter
+from django.urls import path
+from alerts.consumers import AlertConsumer, PatientNotificationConsumer
+from communication.consumers import ChatConsumer
+from alerts.ws_auth import JWTAuthMiddleware
 
 application = ProtocolTypeRouter({
     "http": django_asgi_app,

@@ -13,6 +13,7 @@ import { SecureWoundImage } from '@/components/common/SecureWoundImage'
 import { AlertsListView } from '@/components/common/AlertsListView'
 import { ChatPanel } from '@/components/chat/ChatPanel'
 import { ClinicalDisclaimer } from '@/components/common/ClinicalDisclaimer'
+import { unwrapList } from '@/lib/utils'
 import {
   HeartPulse,
   Activity,
@@ -98,14 +99,14 @@ export const PatientDashboardView: React.FC<PatientDashboardViewProps> = ({
           apiFetch<WoundImage[]>('/wound/images/'),
         ])
 
-        if (trendRes.status === 'fulfilled') setRecoveryTrend(trendRes.value || [])
+        if (trendRes.status === 'fulfilled') setRecoveryTrend(unwrapList<RecoveryTrendItem>(trendRes.value))
         if (riskRes.status === 'fulfilled') setRiskData(riskRes.value)
-        if (todayDosesRes.status === 'fulfilled') setTodayDoses(todayDosesRes.value || [])
-        if (upcomingDosesRes.status === 'fulfilled') setUpcomingDoses(upcomingDosesRes.value || [])
+        if (todayDosesRes.status === 'fulfilled') setTodayDoses(unwrapList<MedicationDose>(todayDosesRes.value))
+        if (upcomingDosesRes.status === 'fulfilled') setUpcomingDoses(unwrapList<MedicationDose>(upcomingDosesRes.value))
         if (adherenceRes.status === 'fulfilled') setAdherence(adherenceRes.value)
-        if (alertsRes.status === 'fulfilled') setAlerts(alertsRes.value || [])
-        if (logsRes.status === 'fulfilled') setHealthLogs(logsRes.value || [])
-        if (woundsRes.status === 'fulfilled') setWoundImages(woundsRes.value || [])
+        if (alertsRes.status === 'fulfilled') setAlerts(unwrapList<AlertItem>(alertsRes.value))
+        if (logsRes.status === 'fulfilled') setHealthLogs(unwrapList<DailyHealthLog>(logsRes.value))
+        if (woundsRes.status === 'fulfilled') setWoundImages(unwrapList<WoundImage>(woundsRes.value))
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Error fetching patient data.'
@@ -143,8 +144,8 @@ export const PatientDashboardView: React.FC<PatientDashboardViewProps> = ({
         apiFetch<MedicationDose[]>('/medication/doses/today/'),
         apiFetch<MedicationDose[]>('/medication/doses/upcoming/?days=7'),
       ])
-      setTodayDoses(todayDosesRes || [])
-      setUpcomingDoses(upcomingDosesRes || [])
+      setTodayDoses(unwrapList<MedicationDose>(todayDosesRes))
+      setUpcomingDoses(unwrapList<MedicationDose>(upcomingDosesRes))
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to record dose.'
       toast({
